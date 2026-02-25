@@ -1,5 +1,7 @@
 import sys
 from typing import TYPE_CHECKING
+from string import Template
+import multiprocessing
 
 # When running this plugin on a Mac, we assume it's for local development
 # purposes. However, due to a compatibility issue with vLLM, which overrides
@@ -37,7 +39,43 @@ class TorchSpyrePlatform(CpuPlatform):
         return "torch-spyre"
 
     @classmethod
+    def log_server_boot(cls, vllm_config: VllmConfig) -> None:
+        # Only log in main process (not in TP workers)
+        if multiprocessing.current_process().name != "MainProcess":
+            return
+
+        # yapf: disable
+        logo_template = Template(
+            template="\n       ${w}█     █     █▄   ▄█${r}       ${red}▄█▀▀█▄${r}  ${orange}█▀▀▀█▄${r}  ${yellow}█   █${r}  ${green}█▀▀▀█▄${r}  ${blue}█▀▀▀▀${r}\n" # noqa: E501
+            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}       ${red}▀▀▄▄▄${r}   ${orange}█▄▄▄█▀${r}  ${yellow}▀▄ ▄▀${r}  ${green}█▄▄▄█▀${r}  ${blue}█▄▄▄${r}   version ${w}%s${r}\n" # noqa: E501
+            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}            ${red}█${r}  ${orange}█${r}        ${yellow}▀█▀${r}   ${green}█ ▀█▄${r}   ${blue}█${r}      model   ${w}%s${r}\n" # noqa: E501
+            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}       ${red}▀▄▄▄█▀${r}  ${orange}█${r}         ${yellow}█${r}    ${green}█   ▀█${r}  ${blue}█▄▄▄▄${r}\n" # noqa: E501
+        )
+        # yapf: enable
+        colors = {
+            "w": "\033[97;1m",  # white
+            "o": "\033[93m",  # orange
+            "b": "\033[94m",  # blue
+            "r": "\033[0m",  # reset
+            "red": "\033[91m",  # red (rainbow start)
+            "orange": "\033[38;5;208m",  # orange
+            "yellow": "\033[93m",  # yellow
+            "green": "\033[92m",  # green
+            "blue": "\033[94m",  # blue (rainbow end)
+        }
+
+        message = logo_template.substitute(colors)
+
+        from vllm_spyre_next import _version
+
+        model_name = vllm_config.model_config.model
+
+        logger.info(message, _version.version, model_name)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        cls.log_server_boot(vllm_config)
+
         # ---- worker ----
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
