@@ -79,6 +79,11 @@ from spyre_inference.custom_ops.mlp_pad import (
 )
 from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
+from spyre_inference.v1.attention.backends.spyre_attn import (
+    SpyreAttentionImpl,
+    SpyrePagedKVCache,
+)
+from spyre_inference.v1.attention.spyre_attn_bucketer import SpyreAttnBucketer
 from spyre_inference.v1.pool import (
     TOKEN_POOLING_TASKS,
     configure_pooling_for_spyre,
@@ -394,6 +399,10 @@ class TorchSpyreModelRunner(GPUModelRunner):
         # Shape bucketer for runtime dispatch (initialized after model load)
         self.spyre_shape_bucketer: SpyreShapeBucketer | None = None
 
+        # Per-layer paged KV caches, kept so warmup can record the attention
+        # kernels against real pages. Populated by initialize_kv_cache_tensors.
+        self._spyre_kv_caches: dict[str, SpyrePagedKVCache] = {}
+
         # Replace Triton kernel with a pure-PyTorch implementation.
         # GPUModelRunner uses @triton.jit which is mocked on non-GPU platforms.
         # The upstream CPU backend uses a C++ kernel (torch.ops._C) as its
@@ -665,6 +674,57 @@ class TorchSpyreModelRunner(GPUModelRunner):
             time.time() - t0,
             len(bucket_sizes),
         )
+        self._record_attention_graphs(bucket_sizes)
+
+    def _record_attention_graphs(self, token_counts: list[int]) -> None:
+        """Pre-compile the attention and reshape_and_cache kernels.
+
+        The model-level warmup above cannot cover these: ``_dummy_run`` delegates
+        upstream, which passes ``attn_metadata=None``, so ``forward`` returns
+        before touching a kernel. Left lazy, each new variant pays a full
+        Inductor compile mid-serving.
+        """
+        if not envs.SPYRE_ATTN_RECORD:
+            logger.info("Attention graph recording disabled (SPYRE_ATTN_RECORD=0)")
+            return
+        if self.vllm_config.model_config.enforce_eager:
+            logger.info("Attention graph recording disabled (enforce_eager=True)")
+            return
+        if self.compilation_config.mode is CompilationMode.NONE:
+            logger.info("Attention graph recording disabled (CompilationMode.NONE)")
+            return
+        if not self._spyre_kv_caches:
+            logger.warning("Attention graph recording skipped: KV cache not initialized yet.")
+            return
+
+        # Every layer keeps its own kernel cache, so each one is recorded. Layers
+        # sharing a head configuration trace to the same graph, so only the first
+        # pays a full Inductor compile and the rest hit its cache; a model whose
+        # layers differ (e.g. mixed sliding-window) pays per distinct shape.
+        static_ctx = self.compilation_config.static_forward_context
+        t0 = time.time()
+        total = 0
+        with _set_spyre_compilation_settings(self.vllm_config):
+            bucketer: SpyreAttnBucketer | None = None
+            for layer_name, kv_cache in self._spyre_kv_caches.items():
+                layer = static_ctx.get(layer_name)
+                impl = getattr(layer, "impl", None)
+                if not isinstance(impl, SpyreAttentionImpl):
+                    continue
+                if bucketer is None:
+                    # block_size off the allocated pages ([num_blocks, block_size, ...]);
+                    # it lives on the metadata builder, not the impl.
+                    bucketer = SpyreAttnBucketer(self.vllm_config, kv_cache[0].shape[1])
+                logger.info("Recording attention graphs for layer %s...", layer_name)
+                total += impl.record_graphs(kv_cache, self._spyre_device, bucketer)
+                total += impl.record_kv_update_graphs(kv_cache, self._spyre_device, token_counts)
+            if bucketer is not None:
+                bucketer.mark_warmed_up()
+        logger.info(
+            "Attention graph recording complete: %d graphs in %.3fs.",
+            total,
+            time.time() - t0,
+        )
 
     def _determine_batch_execution_and_padding(
         self,
@@ -866,10 +926,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
         """
         from vllm.v1.worker.utils import bind_kv_cache
 
-        from spyre_inference.v1.attention.backends.spyre_attn import (
-            SpyrePagedKVCache,
-            slot_major_kv_layout,
-        )
+        from spyre_inference.v1.attention.backends.spyre_attn import slot_major_kv_layout
 
         # Iterate kv_cache_tensors (one entry per physical buffer)
         spec_by_layer = {
@@ -918,6 +975,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
             self.compilation_config.static_forward_context,
             self.kv_caches,
         )
+        self._spyre_kv_caches = dict(kv_caches)
         return kv_caches
 
     # --- Stubs copied from CPUModelRunner ---

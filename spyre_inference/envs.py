@@ -30,6 +30,9 @@ if TYPE_CHECKING:
     SPYRE_DEVICES: str | None = None
     SPYRE_COMPILE_GRANULARITY: str = "block"
     SPYRE_ATTN_PROFILING: bool = False
+    SPYRE_ATTN_RECORD: bool = True
+    SPYRE_ATTN_KV_BUCKETS: str | None = None
+    SPYRE_ATTN_QUERY_BUCKETS: str | None = None
     SPYRE_NUM_CPUS: int = 0
     SPYRE_UPDATE_THREAD_CONFIG: bool = True
 
@@ -48,6 +51,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When "1", wrap attention forward/softmax in torch.profiler.record_function
     # spans for kineto trace capture. Off by default.
     "SPYRE_ATTN_PROFILING": lambda: bool(int(os.getenv("SPYRE_ATTN_PROFILING", "0"))),
+    # When "1" (default), pre-compile every attention variant the run can need during
+    # warmup, so no request pays an Inductor compile mid-serving. "0" falls back to
+    # compiling each variant lazily on first use.
+    "SPYRE_ATTN_RECORD": lambda: bool(int(os.getenv("SPYRE_ATTN_RECORD", "1"))),
+    # Comma-separated kv_len tiers to record, overriding the default ladder derived
+    # from KV_LENGTH_ALIGNMENT up to max_model_len. Unset uses the default.
+    "SPYRE_ATTN_KV_BUCKETS": lambda: os.getenv("SPYRE_ATTN_KV_BUCKETS"),
+    # Comma-separated query_len chunks to record, overriding the default ladder
+    # [1] + multiples of QUERY_CHUNK_SIZE up to max_num_batched_tokens.
+    "SPYRE_ATTN_QUERY_BUCKETS": lambda: os.getenv("SPYRE_ATTN_QUERY_BUCKETS"),
     # CPU budget used to size thread pools. "0" (default) auto-detects the budget
     # (cgroup CPU quota, then physical core count).
     "SPYRE_NUM_CPUS": lambda: int(os.getenv("SPYRE_NUM_CPUS", "0")),

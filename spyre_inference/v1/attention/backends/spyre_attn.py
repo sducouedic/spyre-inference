@@ -16,6 +16,7 @@
 
 import bisect
 import functools
+import time
 from dataclasses import dataclass
 from typing import ClassVar, NamedTuple
 
@@ -39,6 +40,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from spyre_inference import envs
 from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
+from spyre_inference.v1.attention.spyre_attn_bucketer import (
+    SpyreAttnBucket,
+    SpyreAttnBucketer,
+)
 
 logger = init_logger(__name__)
 
@@ -543,6 +548,10 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         self._num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
         self._num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_blocks_per_seq)
 
+        # Query-length ladder shared with the warmup recorder, so a batch built
+        # here dispatches to a kernel that pass already compiled.
+        self._attn_bucketer = SpyreAttnBucketer(vllm_config, self.block_size)
+
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
 
@@ -794,7 +803,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         if max_query_len == 1:
             aligned_max_query_len = 1
         else:
-            aligned_max_query_len = (
+            # Round to a recorded bucket so the kernel this batch needs was
+            # already compiled during warmup. Over the top bucket the bucketer
+            # returns None and we fall back to plain chunk alignment, which may
+            # compile on demand.
+            aligned_max_query_len = self._attn_bucketer.find_query_bucket(max_query_len) or (
                 (max_query_len + QUERY_CHUNK_SIZE - 1) // QUERY_CHUNK_SIZE * QUERY_CHUNK_SIZE
             )
         aligned_max_seq_len = (
@@ -1058,6 +1071,12 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # soft-capping (kernel takes the same path as upstream).
         self.logits_soft_cap: float = 0.0 if logits_soft_cap is None else float(logits_soft_cap)
 
+        # Read from config rather than hardcoded, matching the metadata builder;
+        # the recorder needs it to fabricate dummy args in the model's dtype.
+        # TorchSpyrePlatform.check_and_update_config enforces float16 upstream.
+        _dtype = get_current_vllm_config().model_config.dtype
+        self.model_dtype: torch.dtype = _dtype if isinstance(_dtype, torch.dtype) else torch.float16
+
         # Always compiled: eager index_copy_ rejects an int32 index and falls
         # back to CPU with an int64 one.
         self._reshape_fn = torch.compile(_reshape_and_cache_kernel, dynamic=False)
@@ -1191,6 +1210,225 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         )
 
         return output
+
+    def record_graphs(
+        self,
+        kv_cache: SpyrePagedKVCache,
+        device: torch.device,
+        bucketer: "SpyreAttnBucketer",
+    ) -> int:
+        """Compile every attention variant the bucketer enumerates.
+
+        Called from warmup, after the KV cache exists: the kernel
+        ``index_select``s real pages, so there is nothing to trace against in
+        ``__init__``. Memoizing the factory is not enough either — ``torch.compile``
+        traces on the first *call*, so each variant is invoked once here.
+
+        Returns the number of variants actually compiled. Failures are logged and
+        skipped rather than raised: an unreachable-but-enumerated variant must not
+        take down engine startup, and dispatch falls back to lazy compilation.
+        """
+        if not self._compile_attn:
+            return 0
+
+        k_pages, v_pages = kv_cache
+        num_pages, block_size = k_pages.shape[0], k_pages.shape[1]
+        variants = bucketer.variants()
+        t_start = time.time()
+
+        # Each variant is a distinct function object, but dynamo's accumulated
+        # recompile limit is global, so a ladder wider than it silently stops
+        # compiling partway through and the rest fall back to eager.
+        prev_limit = torch._dynamo.config.accumulated_recompile_limit
+        torch._dynamo.config.accumulated_recompile_limit = max(  # ty: ignore[invalid-assignment]
+            prev_limit, 4 * len(variants) + 64
+        )
+
+        logger.info("Recording %d attention variants for layer...", len(variants))
+        try:
+            recorded = self._record_all(variants, k_pages, v_pages, num_pages, block_size, device)
+        finally:
+            torch._dynamo.config.accumulated_recompile_limit = prev_limit  # ty: ignore[invalid-assignment]
+
+        logger.info(
+            "Recorded %d/%d attention variants in %.2fs.",
+            recorded,
+            len(variants),
+            time.time() - t_start,
+        )
+        return recorded
+
+    def _record_all(
+        self,
+        variants: "list[SpyreAttnBucket]",
+        k_pages: torch.Tensor,
+        v_pages: torch.Tensor,
+        num_pages: int,
+        block_size: int,
+        device: torch.device,
+    ) -> int:
+        recorded = 0
+        for i, bucket in enumerate(variants, start=1):
+            if bucket.num_blocks > num_pages:
+                # The ladder is sized from max_model_len; a small KV allocation
+                # cannot host that many distinct pages to gather.
+                continue
+            if bucket.key in self._attn_fns:
+                continue
+            t0 = time.time()
+            try:
+                self._record_one(bucket, k_pages, v_pages, block_size, device)
+            except Exception:
+                # Keep the partial cache: variants already recorded stay valid.
+                self._attn_fns.pop(bucket.key, None)
+                logger.warning(
+                    "Attention variant %s failed to record; it will compile on first use instead.",
+                    bucket.key,
+                    exc_info=True,
+                )
+                continue
+            recorded += 1
+            logger.info(
+                "  [%d/%d] recorded %s in %.2fs",
+                i,
+                len(variants),
+                bucket.key,
+                time.time() - t0,
+            )
+        return recorded
+
+    def _record_one(
+        self,
+        bucket: "SpyreAttnBucket",
+        k_pages: torch.Tensor,
+        v_pages: torch.Tensor,
+        block_size: int,
+        device: torch.device,
+    ) -> None:
+        """Trace one variant on dummy args matching the kernel's shape contract."""
+        q_len = bucket.padded_query_len
+        attn_fn = self._get_attn_fn(
+            bucket.num_blocks,
+            q_len,
+            store_mode=bucket.store_mode,
+            needs_gather=bucket.needs_gather,
+        )
+
+        query = convert(
+            torch.zeros(q_len, self.num_heads, self.head_size, dtype=self.model_dtype),
+            device=device,
+        )
+
+        # Row table width is stick-aligned exactly as _build_query_row_tables does.
+        row_table = None
+        if bucket.needs_gather or bucket.store_mode == "index":
+            index_len = (
+                (q_len + INT32_ELEMS_PER_STICK - 1) // INT32_ELEMS_PER_STICK
+            ) * INT32_ELEMS_PER_STICK
+            rows = torch.zeros(index_len, dtype=torch.int32)
+            rows[:q_len] = torch.arange(q_len, dtype=torch.int32)
+            row_table = convert(rows, device=device)
+
+        page_index_table = convert(
+            torch.zeros(bucket.num_blocks, INT32_ELEMS_PER_STICK, dtype=torch.int32),
+            device=device,
+        )
+
+        # All-zero additive tiles: values are irrelevant to tracing, and zero is
+        # the one choice that cannot leave a row fully masked (which would make
+        # tile_sum 0 and attn NaN).
+        mask_tiles = [
+            convert(torch.zeros(q_len, block_size, dtype=self.model_dtype), device=device)
+            for _ in range(bucket.num_blocks)
+        ]
+
+        alibi_bias_tiles = None
+        if self.alibi_slopes is not None:
+            alibi_bias_tiles = [
+                convert(
+                    torch.zeros(
+                        self.num_kv_heads,
+                        self.num_queries_per_kv,
+                        1,
+                        block_size,
+                        dtype=self.model_dtype,
+                    ),
+                    device=device,
+                )
+                for _ in range(bucket.num_blocks)
+            ]
+
+        out = None
+        if bucket.store_mode != "none":
+            # "copy" owns every row; "index" scatters into a strictly larger
+            # buffer, which is what makes its store indirect at runtime.
+            out_rows = q_len if bucket.store_mode == "copy" else q_len + 1
+            out = convert(
+                torch.zeros(out_rows, self.num_heads, self.head_size, dtype=self.model_dtype),
+                device=device,
+            )
+
+        attn_fn(
+            query,
+            row_table,
+            k_pages,
+            v_pages,
+            page_index_table,
+            mask_tiles,
+            self.scale,
+            alibi_bias_tiles=alibi_bias_tiles,
+            out=out,
+        )
+
+    def record_kv_update_graphs(
+        self,
+        kv_cache: SpyrePagedKVCache,
+        device: torch.device,
+        token_counts: list[int],
+    ) -> int:
+        """Pre-compile ``_reshape_fn`` for each distinct token count.
+
+        ``reshape_and_cache`` specializes on the token count like the attention
+        kernels do, so it stalls serving the same way if left lazy.
+
+        This writes zeros into the low slots of the real cache. Harmless: warmup
+        runs right after ``initialize_kv_cache_tensors`` allocated it zeroed, and
+        before any request has claimed a block.
+        """
+        if not self._compile_attn:
+            return 0
+
+        k_pages, _ = kv_cache
+        num_slots = k_pages.shape[0] * k_pages.shape[1]
+        recorded = 0
+        for num_tokens in sorted(set(token_counts), reverse=True):
+            if num_tokens > num_slots:
+                continue
+            t0 = time.time()
+            key = convert(
+                torch.zeros(num_tokens, self.num_kv_heads, self.head_size, dtype=self.model_dtype),
+                device=device,
+            )
+            value = convert(
+                torch.zeros(num_tokens, self.num_kv_heads, self.head_size, dtype=self.model_dtype),
+                device=device,
+            )
+            slots = convert(torch.arange(num_tokens, dtype=torch.int32), device=device)
+            try:
+                self.do_kv_cache_update(None, key, value, kv_cache, slots)
+            except Exception:
+                logger.warning(
+                    "reshape_and_cache failed to record for %d tokens; it will "
+                    "compile on first use instead.",
+                    num_tokens,
+                    exc_info=True,
+                )
+                continue
+            recorded += 1
+            logger.info(
+                "  reshape_and_cache recorded for %d tokens in %.2fs", num_tokens, time.time() - t0
+            )
+        return recorded
 
     def kv_slot_views(self, kv_cache: SpyrePagedKVCache) -> SpyrePagedKVCache:
         """Slot-major views of the pages, built once outside any graph.

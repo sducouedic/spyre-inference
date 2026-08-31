@@ -1,0 +1,192 @@
+# Copyright 2026 The Spyre-Inference Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for the attention graph recorder.
+
+CPU-only: these check that recording populates the kernel cache with exactly
+the keys the bucketer enumerates, and that a subsequent dispatch reuses them
+instead of growing the cache. The kernels run eagerly here (no Spyre), which
+is enough to exercise dummy-arg construction and cache bookkeeping.
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+import torch
+
+from spyre_inference.v1.attention.backends.spyre_attn import (
+    SpyreAttentionImpl,
+    SpyrePagedKVCache,
+)
+from spyre_inference.v1.attention.spyre_attn_bucketer import SpyreAttnBucketer
+
+pytestmark = pytest.mark.attention
+
+NUM_HEADS = 4
+NUM_KV_HEADS = 2
+HEAD_SIZE = 64
+BLOCK_SIZE = 64
+NUM_PAGES = 8
+
+
+@pytest.fixture()
+def impl(default_vllm_config):
+    impl = SpyreAttentionImpl(
+        num_heads=NUM_HEADS,
+        head_size=HEAD_SIZE,
+        scale=1.0 / (HEAD_SIZE**0.5),
+        num_kv_heads=NUM_KV_HEADS,
+        alibi_slopes=None,
+        sliding_window=None,
+    )
+    # The fixture's bare CompilationConfig leaves mode unset, which resolves to
+    # eager. Recording is a no-op there by design, so force the compiled path;
+    # _maybe_compile is what actually decides whether Inductor is invoked.
+    impl._compile_attn = True
+    return impl
+
+
+@pytest.fixture()
+def kv_cache():
+    shape = (NUM_PAGES, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
+    return SpyrePagedKVCache(
+        k_pages=torch.zeros(shape, dtype=torch.float16),
+        v_pages=torch.zeros(shape, dtype=torch.float16),
+    )
+
+
+def make_bucketer(max_model_len=256, max_num_batched_tokens=64):
+    config = MagicMock()
+    config.model_config.max_model_len = max_model_len
+    config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    return SpyreAttnBucketer(config, BLOCK_SIZE)
+
+
+class TestRecordGraphs:
+    def test_populates_cache_with_enumerated_keys(self, impl, kv_cache):
+        bucketer = make_bucketer()
+        assert impl._attn_fns == {}
+
+        recorded = impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+
+        assert recorded > 0
+        expected = {v.key for v in bucketer.variants() if v.num_blocks <= NUM_PAGES}
+        assert set(impl._attn_fns) == expected
+
+    def test_dispatch_after_recording_does_not_grow_the_cache(self, impl, kv_cache):
+        """The acceptance criterion: no request compiles a new variant."""
+        bucketer = make_bucketer()
+        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        snapshot = len(impl._attn_fns)
+
+        for kv_len in (1, 60, 64, 200, 256):
+            for query_len in (1, 5, 32, 64):
+                if query_len > kv_len:
+                    continue
+                bucket = bucketer.dispatch(kv_len, query_len)
+                assert bucket is not None
+                if bucket.num_blocks > NUM_PAGES:
+                    continue
+                impl._get_attn_fn(
+                    bucket.num_blocks,
+                    bucket.padded_query_len,
+                    store_mode=bucket.store_mode,
+                    needs_gather=bucket.needs_gather,
+                )
+
+        assert len(impl._attn_fns) == snapshot
+
+    def test_is_idempotent(self, impl, kv_cache):
+        bucketer = make_bucketer()
+        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        after_first = len(impl._attn_fns)
+
+        assert impl.record_graphs(kv_cache, torch.device("cpu"), bucketer) == 0
+        assert len(impl._attn_fns) == after_first
+
+    def test_skips_variants_exceeding_the_page_allocation(self, impl, kv_cache):
+        """A ladder sized from max_model_len can outrun a small KV cache."""
+        bucketer = make_bucketer(max_model_len=4096)
+        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+
+        assert impl._attn_fns
+        assert all(key[0] <= NUM_PAGES for key in impl._attn_fns)
+
+    def test_eager_records_nothing(self, impl, kv_cache):
+        impl._compile_attn = False
+        assert impl.record_graphs(kv_cache, torch.device("cpu"), make_bucketer()) == 0
+        assert impl._attn_fns == {}
+
+    def test_a_failing_variant_does_not_abort_the_pass(self, impl, kv_cache, monkeypatch):
+        """One bad variant must not take down engine startup."""
+        bucketer = make_bucketer()
+        calls = {"n": 0}
+        real = impl._record_one
+
+        def flaky(bucket, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("synthetic lowering failure")
+            return real(bucket, *args, **kwargs)
+
+        monkeypatch.setattr(impl, "_record_one", flaky)
+        recorded = impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+
+        assert recorded == calls["n"] - 1
+        # The failed key is left uncached, so it can still compile on first use.
+        assert bucketer.variants()[0].key not in impl._attn_fns
+
+
+class TestRecordKvUpdateGraphs:
+    def test_records_each_token_count(self, impl, kv_cache):
+        recorded = impl.record_kv_update_graphs(kv_cache, torch.device("cpu"), [4, 8, 8, 16])
+        assert recorded == 3
+
+    def test_skips_counts_beyond_the_slot_capacity(self, impl, kv_cache):
+        num_slots = NUM_PAGES * BLOCK_SIZE
+        assert impl.record_kv_update_graphs(kv_cache, torch.device("cpu"), [num_slots + 1]) == 0
+
+    def test_eager_records_nothing(self, impl, kv_cache):
+        impl._compile_attn = False
+        assert impl.record_kv_update_graphs(kv_cache, torch.device("cpu"), [8]) == 0
+
+
+class TestRecompileLimit:
+    def test_limit_is_raised_during_recording_and_restored(self, impl, kv_cache):
+        """Dynamo's accumulated limit is global, so a ladder wider than it would
+        otherwise stop compiling partway through and fall back to eager."""
+        bucketer = make_bucketer()
+        before = torch._dynamo.config.accumulated_recompile_limit
+        seen = []
+
+        real = impl._record_one
+
+        def spy(*args, **kwargs):
+            seen.append(torch._dynamo.config.accumulated_recompile_limit)
+            return real(*args, **kwargs)
+
+        impl._record_one = spy
+        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+
+        assert seen and min(seen) >= len(bucketer.variants())
+        assert torch._dynamo.config.accumulated_recompile_limit == before
+
+    def test_limit_is_restored_even_when_recording_raises(self, impl, kv_cache, monkeypatch):
+        before = torch._dynamo.config.accumulated_recompile_limit
+        monkeypatch.setattr(
+            impl, "_record_all", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        with pytest.raises(RuntimeError):
+            impl.record_graphs(kv_cache, torch.device("cpu"), make_bucketer())
+        assert torch._dynamo.config.accumulated_recompile_limit == before
