@@ -30,10 +30,11 @@ from spyre_inference.v1.attention.spyre_attn_bucketer import (
 BLOCK_SIZE = 64
 
 
-def make_config(max_model_len=2048, max_num_batched_tokens=512):
+def make_config(max_model_len=2048, max_num_batched_tokens=512, max_num_seqs=32):
     config = MagicMock()
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    config.scheduler_config.max_num_seqs = max_num_seqs
     return config
 
 
