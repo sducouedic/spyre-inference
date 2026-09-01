@@ -304,8 +304,9 @@ def _create_compilable_page_attn(
         attn = attn.reshape(1, num_heads, padded_query_len, head_size).transpose(1, 2)
         attn = attn.reshape(padded_query_len, num_heads, head_size)
         if store_mode == "copy":
+            # Always a single-row destination
             assert out is not None
-            out.copy_(attn[: out.shape[0]])
+            out.copy_(attn[:1])
             return out
         if store_mode == "index":
             # `out` and `query` are both indexed by absolute token row. Storing the
@@ -1063,7 +1064,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         self._reshape_fn = torch.compile(_reshape_and_cache_kernel, dynamic=False)
 
         # Compiled attention loops, keyed by
-        # (num_blocks, padded_query_len, store_mode, store_len, needs_gather)
+        # (num_blocks, padded_query_len, store_mode, needs_gather)
         self._attn_fns: dict[tuple[int, int, str, bool], object] = {}
 
         self._kv_slots: SpyrePagedKVCache | None = None
@@ -1443,14 +1444,12 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
             store_mode = "none"
             if fused_store_ok:
-                if output.shape[0] == query_len:
-                    # Owns every row, so the store is a plain copy_: no index, and
-                    # no relayout of the destination.
+                # index_copy_ writes nothing to a single-row destination
+                # (torch-spyre#4007), which is the batch-1 decode shape.
+                if output.shape[0] == 1:
+                    assert query_len == 1 and q_start == 0
                     store_mode = "copy"
-                elif output.shape[0] > 1:
-                    # Owns only a slice, so the store must be indirect. A single-row
-                    # destination is excluded: index_copy_ writes nothing there
-                    # (torch-spyre#4007).
+                else:
                     store_mode = "index"
 
             row_table = None
