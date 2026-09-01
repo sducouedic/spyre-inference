@@ -167,6 +167,10 @@ class SpyreAttnBucketer:
         return self._query_buckets
 
     @property
+    def num_blocks_buckets(self) -> list[int]:
+        return self._num_blocks_buckets
+
+    @property
     def decode_num_seqs_buckets(self) -> tuple[int, ...]:
         return self._decode_num_seqs_buckets
 

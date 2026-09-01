@@ -124,6 +124,46 @@ class TestRecordGraphs:
         assert impl._attn_fns
         assert all(key[0] <= NUM_PAGES for key in impl._attn_fns)
 
+    def test_real_metadata_dispatch_does_not_grow_the_cache(self, impl, kv_cache, monkeypatch):
+        """The acceptance criterion, driven from real builder metadata.
+
+        ``test_dispatch_after_recording_does_not_grow_the_cache`` asks the
+        bucketer what it would dispatch; this one builds metadata for off-ladder
+        kv_lens through ``SpyreAttentionMetadataBuilder`` and dispatches on the
+        block counts ``build()`` actually produced. Without KV padding, every one
+        of these misses the recorded set and compiles.
+        """
+        from tests.attention.test_spyre_attn import _padded_mask_metadata
+
+        bucketer = make_bucketer(max_model_len=NUM_PAGES * BLOCK_SIZE)
+        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        snapshot = len(impl._attn_fns)
+        assert snapshot > 0
+
+        for query_len, kv_len in [(1, 1), (1, 65), (1, 200), (7, 65), (32, 300), (33, 300)]:
+            metadata = _padded_mask_metadata(
+                [(query_len, kv_len)],
+                block_size=BLOCK_SIZE,
+                num_query_heads=NUM_HEADS,
+                num_kv_heads=NUM_KV_HEADS,
+                head_size=HEAD_SIZE,
+                max_num_blocks=NUM_PAGES,
+            )
+            assert metadata.padded_num_blocks is not None
+            num_blocks = metadata.padded_num_blocks[0]
+            assert num_blocks in bucketer.num_blocks_buckets, (
+                f"kv_len={kv_len} produced an unrecorded block count {num_blocks}"
+            )
+            for store_mode, needs_gather in (("index", True), ("copy", False)):
+                impl._get_attn_fn(
+                    num_blocks,
+                    metadata.aligned_max_query_len,
+                    store_mode=store_mode,
+                    needs_gather=needs_gather,
+                )
+
+        assert len(impl._attn_fns) == snapshot
+
     def test_eager_records_nothing(self, impl, kv_cache):
         impl._compile_attn = False
         assert impl.record_graphs(kv_cache, torch.device("cpu"), make_bucketer()) == 0

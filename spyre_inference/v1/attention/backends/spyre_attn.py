@@ -468,6 +468,13 @@ class SpyreAttentionMetadata(AttentionMetadata):
     # per 256-token tier, not per distinct sequence length.
     aligned_max_seq_len: int = 0
 
+    # Per-sequence PADDED active-block count: the value forward() passes as the
+    # kernel's num_blocks key, rounded up onto the recorder's ladder so serving
+    # dispatches to a variant warmup already traced. Equals
+    # len(attention_mask_tiles[s]). None on the sliding-window path, which is
+    # left unpadded (see build()).
+    padded_num_blocks: list[int] | None = None
+
     # Gather indices for the paged attention loop, one row per active block:
     # [num_seqs, max_active_blocks, INT32_ELEMS_PER_STICK] int32 with the page
     # index at [s, b, 0]. Each index needs its own stick-wide row to compile,
@@ -565,8 +572,15 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         self._num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
         self._num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_blocks_per_seq)
 
-        # Query-length ladder shared with the warmup recorder, so a batch built
-        # here dispatches to a kernel that pass already compiled.
+        # Query- and block-count ladders shared with the warmup recorder, so a
+        # batch built here dispatches to a kernel that pass already compiled.
+        # This is a second instance: the recorder builds its own from the
+        # allocated page shape (spyre_model_runner._record_attention_graphs),
+        # which asserts the two ladders agree. They must, because build() now
+        # rounds num_blocks onto this ladder — a divergence would make *every*
+        # request miss the recorded set, strictly worse than not padding.
+        # (mark_warmed_up() is only ever called on the recorder's instance;
+        # nothing reads is_warmed_up, so this one's flag stays False.)
         self._attn_bucketer = SpyreAttnBucketer(vllm_config, self.block_size)
 
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:
@@ -582,6 +596,25 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             self._zero_tile = torch.zeros(shape, dtype=self.model_dtype)
             self._zero_tile_shape = shape
         return self._zero_tile
+
+    def _pad_num_blocks(self, num_blocks: int, max_blocks_available: int) -> int:
+        """Round an active-block count up onto the recorder's num_blocks ladder.
+
+        Returns the input unchanged when the rounded count would exceed the top
+        of the ladder or the block-table width (``_ladder`` floors at one step,
+        so a ``max_model_len`` under one KV tier yields a bucket wider than the
+        allocation). Both cases fall back to compiling on demand, as before.
+        """
+        if num_blocks == 0:
+            # Zero real blocks must stay zero: forward() early-outs to a zero
+            # output, whereas a fully-masked padded tile divides by a zero
+            # softmax denominator.
+            return 0
+        padded = SpyreAttnBucketer._round_up(num_blocks, self._attn_bucketer.num_blocks_buckets)
+        if padded is None or padded > max_blocks_available:
+            return num_blocks
+        assert padded >= num_blocks
+        return padded
 
     def _build_attention_mask(
         self,
@@ -836,15 +869,40 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         attention_mask_tiles: list[list[torch.Tensor]] = []
         active_block_indices: list[list[int]] | None = None
 
+        padded_num_blocks: list[int] | None = None
+        real_num_blocks: list[int] = []
+
         if self.sliding_window is None:
+            # Round each sequence's block count up onto the recorder's ladder.
+            # seq_lens itself is NOT padded: it feeds the mask's kv_valid cutoff,
+            # the causal context_len and the ALiBi offset, all of which need the
+            # true length. The padded count is carried separately and consumed
+            # only as a block/tile/page-index count.
+            max_blocks_available = block_table.shape[1]
+            for s in range(num_seqs):
+                n = (int(seq_lens[s].item()) + block_size - 1) // block_size
+                real_num_blocks.append(n)
+            padded_num_blocks = [
+                self._pad_num_blocks(n, max_blocks_available) for n in real_num_blocks
+            ]
+
+            # The mask's KV width must cover the padded extent, not just
+            # aligned_max_seq_len: a ladder tier can overrun the 256-token
+            # alignment (max_seq_len=513 -> 9 blocks -> padded to 16 -> 1024
+            # columns vs. an aligned_max_seq_len of 768), and the tile slices
+            # would come back short.
+            mask_kv_width = max(aligned_max_seq_len, max(padded_num_blocks) * block_size)
+
             # No sliding window: build the full additive mask and split it into
-            # per-block tiles (one tile per absolute block index).
+            # per-block tiles (one tile per absolute block index). Padded tiles
+            # need no special construction — kv_valid = kv_pos < seq_lens already
+            # emits finfo.min for every column at or past the true length.
             mask_cpu = self._build_attention_mask(
                 seq_lens,
                 query_start_loc,
                 apply_causal_mask,
                 aligned_max_query_len,
-                aligned_max_seq_len,
+                mask_kv_width,
                 torch.device("cpu"),
             )
             # Pre-tile the mask: split into per-block tiles.
@@ -852,9 +910,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # so tiling only follows the KV dimension.
             for s in range(num_seqs):
                 seq_tiles: list[torch.Tensor] = []
-                kv_len_s = int(seq_lens[s].item())
-                num_blocks_s = (kv_len_s + block_size - 1) // block_size
-                for b in range(num_blocks_s):
+                for b in range(padded_num_blocks[s]):
                     col_start = b * block_size
                     col_end = col_start + block_size
                     tile = mask_cpu[s, :aligned_max_query_len, col_start:col_end]
@@ -865,6 +921,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # Sliding window: arithmetic block-skip. Blocks entirely outside
             # every query's window are dropped; interior blocks share a
             # zero mask tile; only boundary blocks get real per-query cutoffs.
+            # Left unpadded (padded_num_blocks stays None). len(active_bs) here is
+            # a window-width quantity, nearly constant across decode steps, so
+            # this path already reuses kernels; and active_bs starts at
+            # first_active > 0, so appended indices would fall outside the
+            # allocation. TODO: if it ever needs recording, give it its own
+            # window-width ladder rather than the KV-tier one.
             active_block_indices = []
             query_lens_list = (query_start_loc[1:] - query_start_loc[:-1]).tolist()
             seq_lens_list = seq_lens.tolist()
@@ -905,8 +967,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         block_ids_padded_cpu = None
         mask_by_block_cpu = None
         if max_query_len == 1 and self.sliding_window is None and num_seqs >= _MIN_SEQS_BUCKET:
+            # Real counts, not padded: this path has its own lattice and its own
+            # recorded variants, so an inflated num_active would only push it
+            # onto a larger power-of-two bucket and add dead work. Safe because
+            # padding only appends, leaving the real tile prefix unchanged.
             b_seqs = _find_bucket(num_seqs, self._num_seqs_buckets)
-            b_blocks = _find_bucket(max(num_active), self._num_blocks_buckets)
+            b_blocks = _find_bucket(max(real_num_blocks), self._num_blocks_buckets)
             if b_seqs is not None and b_blocks is not None:
                 bucket_num_seqs = b_seqs
                 bucket_num_blocks = b_blocks
@@ -922,7 +988,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 # (32) emits a Mod(d0, b_blocks) stick expression the Spyre
                 # inductor rejects.
                 block_ids_padded_cpu = torch.zeros(b_seqs * b_blocks, dtype=torch.int32)
-                for s, n in enumerate(num_active):
+                for s, n in enumerate(real_num_blocks):
                     n_use = min(n, b_blocks)
                     block_ids_padded_cpu[s * b_blocks : s * b_blocks + n_use] = block_table[
                         s, :n_use
@@ -937,7 +1003,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     dtype=torch.float16,
                 )
                 for s in range(num_seqs):
-                    n_use = min(num_active[s], b_blocks)
+                    n_use = min(real_num_blocks[s], b_blocks)
                     for b in range(n_use):
                         mask_bs_bb[s, b] = attention_mask_tiles[s][b][0]
                 mask_by_block_cpu = (
@@ -967,6 +1033,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             page_index_table_cpu=page_index_table_cpu,
             aligned_max_query_len=aligned_max_query_len,
             aligned_max_seq_len=aligned_max_seq_len,
+            padded_num_blocks=padded_num_blocks,
             bucket_num_seqs=bucket_num_seqs,
             bucket_num_blocks=bucket_num_blocks,
             query_row_ids_cpu=query_row_ids_cpu,
@@ -1742,6 +1809,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         seq_lens = attn_metadata.seq_lens
         mask_tiles_all = attn_metadata.attention_mask_tiles_device
         active_block_indices_all = attn_metadata.active_block_indices
+        padded_num_blocks = attn_metadata.padded_num_blocks
         aligned_max_query_len = attn_metadata.aligned_max_query_len
         page_index_tables = attn_metadata.page_index_tables
         # Folds the per-layer eager slice-assign into the attention jobplan.
@@ -1770,15 +1838,18 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             query_len = q_end - q_start
             kv_len = int(seq_lens[seq_idx].item())
 
-            num_blocks_needed = (kv_len + block_size - 1) // block_size
-
             # Restrict to active (non-fully-masked) blocks when sliding window
             # is set. When active_block_indices_all is None (no sliding), all
-            # blocks are active in their natural order.
+            # blocks are active in their natural order — padded up onto the
+            # recorder's ladder by build(), so the num_blocks key below hits a
+            # variant warmup already traced. The trailing padded blocks are
+            # fully masked, hence inert.
             if active_block_indices_all is not None:
                 active_bs = active_block_indices_all[seq_idx]
+            elif padded_num_blocks is not None:
+                active_bs = list(range(padded_num_blocks[seq_idx]))
             else:
-                active_bs = list(range(num_blocks_needed))
+                active_bs = list(range((kv_len + block_size - 1) // block_size))
 
             if len(active_bs) == 0:
                 # Every KV position is outside every query's window. Attention
@@ -1789,6 +1860,9 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             page_index_table = page_index_tables[seq_idx]
             # mask_tiles_all[seq_idx] is indexed by position within active_bs.
             mask_tiles = mask_tiles_all[seq_idx][: len(active_bs)]
+            # Ties the builder's tile count to the kernel's num_blocks key: a
+            # short slice here would silently hand the kernel a wrong shape.
+            assert len(mask_tiles) == len(active_bs)
 
             # ALiBi bias tiles: slope[h] * (kv_pos - context_len), one per block.
             #
@@ -1800,6 +1874,11 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             # kv-dependent term — the softmax output is bit-identical to the full
             # form, and each tile stays 1D over KV (block_size floats per head)
             # instead of 2D (aligned_max_query_len * block_size).
+            #
+            # Padded blocks get a tile too (the loop iterates active_bs), whose
+            # values stay finite — slopes are small negative powers of two — so
+            # they saturate under the mask's finfo.min and stay inert. Only +inf
+            # could corrupt the running max, and it is unreachable here.
             #
             # Matches vllm/v1/attention/ops/triton_attention_helpers.py::apply_alibi_to_score
             # (alibi_offset = seq_offset - context_len) — the production Triton path.

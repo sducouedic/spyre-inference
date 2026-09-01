@@ -726,6 +726,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
                     # block_size off the allocated pages ([num_blocks, block_size, ...]);
                     # it lives on the metadata builder, not the impl.
                     bucketer = SpyreAttnBucketer(self.vllm_config, kv_cache[0].shape[1])
+                    self._assert_builder_ladder_matches(bucketer)
                 logger.info("Recording attention graphs for layer %s...", layer_name)
                 total += impl.record_graphs(kv_cache, self._spyre_device, bucketer)
                 total += impl.record_kv_update_graphs(kv_cache, self._spyre_device, token_counts)
@@ -737,6 +738,32 @@ class TorchSpyreModelRunner(GPUModelRunner):
             total,
             time.time() - t0,
         )
+
+    def _assert_builder_ladder_matches(self, bucketer: SpyreAttnBucketer) -> None:
+        """Fail loudly if the metadata builder's ladder differs from the recorder's.
+
+        The builder rounds each sequence's num_blocks onto its own bucketer's
+        ladder. If the two diverge, *every* request pads to a block count that
+        was never recorded — strictly worse than not padding at all.
+        """
+        for group in self._attn_group_iterator():
+            builder = group.get_metadata_builder()
+            other = getattr(builder, "_attn_bucketer", None)
+            if other is None:
+                continue
+            if (other.block_size, other.num_blocks_buckets) != (
+                bucketer.block_size,
+                bucketer.num_blocks_buckets,
+            ):
+                raise RuntimeError(
+                    "Attention bucketer ladders diverged: recorder has "
+                    f"block_size={bucketer.block_size} "
+                    f"num_blocks={bucketer.num_blocks_buckets}, builder "
+                    f"{type(builder).__name__} has block_size={other.block_size} "
+                    f"num_blocks={other.num_blocks_buckets}. build() pads onto the "
+                    "builder's ladder, so a mismatch means no request hits a "
+                    "recorded kernel."
+                )
 
     def _determine_batch_execution_and_padding(
         self,
