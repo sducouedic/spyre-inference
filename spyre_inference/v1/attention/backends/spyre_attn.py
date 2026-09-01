@@ -1556,14 +1556,18 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         )
         k_list = [
             convert(
-                torch.zeros(b_seqs * num_kv_heads, 1, block_size, head_size, dtype=self.model_dtype),
+                torch.zeros(
+                    b_seqs * num_kv_heads, 1, block_size, head_size, dtype=self.model_dtype
+                ),
                 device=device,
             )
             for _ in range(b_blocks)
         ]
         v_list = [
             convert(
-                torch.zeros(b_seqs * num_kv_heads, 1, block_size, head_size, dtype=self.model_dtype),
+                torch.zeros(
+                    b_seqs * num_kv_heads, 1, block_size, head_size, dtype=self.model_dtype
+                ),
                 device=device,
             )
             for _ in range(b_blocks)
