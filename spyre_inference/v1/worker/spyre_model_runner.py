@@ -729,6 +729,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 logger.info("Recording attention graphs for layer %s...", layer_name)
                 total += impl.record_graphs(kv_cache, self._spyre_device, bucketer)
                 total += impl.record_kv_update_graphs(kv_cache, self._spyre_device, token_counts)
+                total += impl.record_bucketed_decode_graphs(bucketer, self._spyre_device)
             if bucketer is not None:
                 bucketer.mark_warmed_up()
         logger.info(

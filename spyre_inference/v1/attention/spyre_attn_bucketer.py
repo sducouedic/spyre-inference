@@ -102,12 +102,14 @@ class SpyreAttnBucketer:
         self.block_size = block_size
         max_model_len = vllm_config.model_config.max_model_len
         max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
         # Imported at call time, not module scope: spyre_attn imports this
         # module, so a top-level import back into it would be circular.
         from spyre_inference.v1.attention.backends.spyre_attn import (
             KV_LENGTH_ALIGNMENT,
             QUERY_CHUNK_SIZE,
+            _powers_of_two_up_to,
         )
 
         kv = _parse_ladder(envs.SPYRE_ATTN_KV_BUCKETS)
@@ -132,6 +134,17 @@ class SpyreAttnBucketer:
             {(kv + block_size - 1) // block_size for kv in self._kv_buckets}
         )
 
+        # Separate lattice for the bucketed multi-seq decode kernel
+        # (_get_bucketed_decode_kernel): SpyreAttentionMetadataBuilder derives
+        # these the same way, from max_num_seqs and max_model_len / block_size.
+        # Kept distinct from the varlen ladders above — the decode kernel
+        # specializes on (num_seqs, num_blocks) directly, not on a kv_len tier.
+        max_num_blocks_per_seq = (max_model_len + block_size - 1) // block_size
+        self._decode_num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
+        self._decode_num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(
+            max_num_blocks_per_seq
+        )
+
         self._is_warmed_up = False
 
         logger.info(
@@ -152,6 +165,14 @@ class SpyreAttnBucketer:
     @property
     def query_buckets(self) -> list[int]:
         return self._query_buckets
+
+    @property
+    def decode_num_seqs_buckets(self) -> tuple[int, ...]:
+        return self._decode_num_seqs_buckets
+
+    @property
+    def decode_num_blocks_buckets(self) -> tuple[int, ...]:
+        return self._decode_num_blocks_buckets
 
     @property
     def is_warmed_up(self) -> bool:
@@ -227,3 +248,18 @@ class SpyreAttnBucketer:
                         )
                     )
         return out
+
+    def decode_variants(self) -> list[tuple[int, int]]:
+        """Every ``(bucket_num_seqs, bucket_num_blocks)`` pair the bucketed
+        decode kernel (``_get_bucketed_decode_kernel``) can dispatch to,
+        largest first. Below ``_MIN_SEQS_BUCKET`` the per-seq loop is always
+        used instead, so those pairs are never recorded.
+        """
+        from spyre_inference.v1.attention.backends.spyre_attn import _MIN_SEQS_BUCKET
+
+        return [
+            (num_seqs, num_blocks)
+            for num_seqs in sorted(self._decode_num_seqs_buckets, reverse=True)
+            if num_seqs >= _MIN_SEQS_BUCKET
+            for num_blocks in sorted(self._decode_num_blocks_buckets, reverse=True)
+        ]
