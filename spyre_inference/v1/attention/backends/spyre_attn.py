@@ -306,7 +306,7 @@ def _create_compilable_page_attn(
         if store_mode == "copy":
             # Always a single-row destination
             assert out is not None
-            out.copy_(attn[:1])
+            out.copy_(attn)
             return out
         if store_mode == "index":
             # `out` and `query` are both indexed by absolute token row. Storing the
