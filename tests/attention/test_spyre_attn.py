@@ -128,6 +128,9 @@ def _build_metadata(
     vllm_config = get_current_vllm_config()
     vllm_config.model_config.get_num_attention_heads = Mock(return_value=num_query_heads)
     vllm_config.model_config.get_num_kv_heads = Mock(return_value=num_kv_heads)
+    # The builder asserts these agree, and derives its padding ladder from the
+    # cache_config one, so a test block_size has to be set in both places.
+    vllm_config.cache_config.block_size = block_size
 
     if sliding_window is not None:
         kv_cache_spec = FullAttentionSpec(
@@ -399,7 +402,7 @@ def _run_spyre_attn_test(
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     from vllm.config import get_current_vllm_config
 
-    ladder = SpyreAttnBucketer(get_current_vllm_config(), block_size).num_blocks_buckets
+    ladder = SpyreAttnBucketer(get_current_vllm_config()).num_blocks_buckets
     padded_width = SpyreAttnBucketer._round_up(max_num_blocks_per_seq, ladder)
     if padded_width is not None:
         max_num_blocks_per_seq = max(max_num_blocks_per_seq, padded_width)
@@ -1877,10 +1880,17 @@ def test_attn_fn_cache_key_is_shape_only(default_vllm_config):
 
 
 def _num_blocks_ladder(block_size: int = 64) -> list[int]:
-    """The recorder's num_blocks ladder for the fixture's config."""
+    """The recorder's num_blocks ladder for the fixture's config.
+
+    Sets ``cache_config.block_size`` for the same reason ``_build_metadata``
+    does: the bucketer derives the ladder from it, so a caller naming a
+    ``block_size`` has to put it where the bucketer reads it.
+    """
     from vllm.config import get_current_vllm_config
 
-    return SpyreAttnBucketer(get_current_vllm_config(), block_size).num_blocks_buckets
+    vllm_config = get_current_vllm_config()
+    vllm_config.cache_config.block_size = block_size
+    return SpyreAttnBucketer(vllm_config).num_blocks_buckets
 
 
 @pytest.mark.parametrize(

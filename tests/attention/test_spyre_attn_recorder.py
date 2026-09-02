@@ -68,10 +68,11 @@ def kv_cache():
 
 def make_bucketer(max_model_len=256, max_num_batched_tokens=64, max_num_seqs=32):
     config = MagicMock()
+    config.cache_config.block_size = BLOCK_SIZE
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
     config.scheduler_config.max_num_seqs = max_num_seqs
-    return SpyreAttnBucketer(config, BLOCK_SIZE)
+    return SpyreAttnBucketer(config)
 
 
 class TestRecordGraphs:
@@ -79,7 +80,7 @@ class TestRecordGraphs:
         bucketer = make_bucketer()
         assert impl._attn_fns == {}
 
-        recorded = impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        recorded = impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
 
         assert recorded > 0
         expected = {v.key for v in bucketer.variants() if v.num_blocks <= NUM_PAGES}
@@ -88,7 +89,7 @@ class TestRecordGraphs:
     def test_dispatch_after_recording_does_not_grow_the_cache(self, impl, kv_cache):
         """The acceptance criterion: no request compiles a new variant."""
         bucketer = make_bucketer()
-        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
         snapshot = len(impl._attn_fns)
 
         for kv_len in (1, 60, 64, 200, 256):
@@ -110,16 +111,16 @@ class TestRecordGraphs:
 
     def test_is_idempotent(self, impl, kv_cache):
         bucketer = make_bucketer()
-        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
         after_first = len(impl._attn_fns)
 
-        assert impl.record_graphs(kv_cache, torch.device("cpu"), bucketer) == 0
+        assert impl.record_graphs(torch.device("cpu"), bucketer, kv_cache) == 0
         assert len(impl._attn_fns) == after_first
 
     def test_skips_variants_exceeding_the_page_allocation(self, impl, kv_cache):
         """A ladder sized from max_model_len can outrun a small KV cache."""
         bucketer = make_bucketer(max_model_len=4096)
-        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
 
         assert impl._attn_fns
         assert all(key[0] <= NUM_PAGES for key in impl._attn_fns)
@@ -136,7 +137,7 @@ class TestRecordGraphs:
         from tests.attention.test_spyre_attn import _padded_mask_metadata
 
         bucketer = make_bucketer(max_model_len=NUM_PAGES * BLOCK_SIZE)
-        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
         snapshot = len(impl._attn_fns)
         assert snapshot > 0
 
@@ -166,7 +167,7 @@ class TestRecordGraphs:
 
     def test_eager_records_nothing(self, impl, kv_cache):
         impl._compile_attn = False
-        assert impl.record_graphs(kv_cache, torch.device("cpu"), make_bucketer()) == 0
+        assert impl.record_graphs(torch.device("cpu"), make_bucketer(), kv_cache) == 0
         assert impl._attn_fns == {}
 
     def test_a_failing_variant_does_not_abort_the_pass(self, impl, kv_cache, monkeypatch):
@@ -182,7 +183,7 @@ class TestRecordGraphs:
             return real(bucket, *args, **kwargs)
 
         monkeypatch.setattr(impl, "_record_one", flaky)
-        recorded = impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        recorded = impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
 
         assert recorded == calls["n"] - 1
         # The failed key is left uncached, so it can still compile on first use.
@@ -191,16 +192,16 @@ class TestRecordGraphs:
 
 class TestRecordKvUpdateGraphs:
     def test_records_each_token_count(self, impl, kv_cache):
-        recorded = impl.record_kv_update_graphs(kv_cache, torch.device("cpu"), [4, 8, 8, 16])
+        recorded = impl.record_kv_update_graphs(torch.device("cpu"), [4, 8, 8, 16], kv_cache)
         assert recorded == 3
 
     def test_skips_counts_beyond_the_slot_capacity(self, impl, kv_cache):
         num_slots = NUM_PAGES * BLOCK_SIZE
-        assert impl.record_kv_update_graphs(kv_cache, torch.device("cpu"), [num_slots + 1]) == 0
+        assert impl.record_kv_update_graphs(torch.device("cpu"), [num_slots + 1], kv_cache) == 0
 
     def test_eager_records_nothing(self, impl, kv_cache):
         impl._compile_attn = False
-        assert impl.record_kv_update_graphs(kv_cache, torch.device("cpu"), [8]) == 0
+        assert impl.record_kv_update_graphs(torch.device("cpu"), [8], kv_cache) == 0
 
 
 class TestRecompileLimit:
@@ -218,7 +219,7 @@ class TestRecompileLimit:
             return real(*args, **kwargs)
 
         impl._record_one = spy
-        impl.record_graphs(kv_cache, torch.device("cpu"), bucketer)
+        impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
 
         assert seen and min(seen) >= len(bucketer.variants())
         assert torch._dynamo.config.accumulated_recompile_limit == before
@@ -229,7 +230,7 @@ class TestRecompileLimit:
             impl, "_record_all", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
         )
         with pytest.raises(RuntimeError):
-            impl.record_graphs(kv_cache, torch.device("cpu"), make_bucketer())
+            impl.record_graphs(torch.device("cpu"), make_bucketer(), kv_cache)
         assert torch._dynamo.config.accumulated_recompile_limit == before
 
 
@@ -246,7 +247,7 @@ class TestRecordBucketedDecodeGraphs:
         bucketer = make_bucketer()
         assert impl._decode_fns == {}
 
-        recorded = impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu"))
+        recorded = impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer)
 
         assert recorded > 0
         assert set(impl._decode_fns) == set(bucketer.decode_variants())
@@ -254,7 +255,7 @@ class TestRecordBucketedDecodeGraphs:
     def test_dispatch_after_recording_does_not_grow_the_cache(self, impl):
         """The acceptance criterion: no decode batch compiles a new variant."""
         bucketer = make_bucketer()
-        impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu"))
+        impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer)
         snapshot = len(impl._decode_fns)
 
         for num_seqs in (4, 5, 8, 16, 32):
@@ -269,20 +270,20 @@ class TestRecordBucketedDecodeGraphs:
 
     def test_is_idempotent(self, impl):
         bucketer = make_bucketer()
-        impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu"))
+        impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer)
         after_first = len(impl._decode_fns)
 
-        assert impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu")) == 0
+        assert impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer) == 0
         assert len(impl._decode_fns) == after_first
 
     def test_eager_records_nothing(self, impl):
         impl._compile_attn = False
-        assert impl.record_bucketed_decode_graphs(make_bucketer(), torch.device("cpu")) == 0
+        assert impl.record_bucketed_decode_graphs(torch.device("cpu"), make_bucketer()) == 0
         assert impl._decode_fns == {}
 
     def test_disabled_flag_records_nothing(self, monkeypatch, impl):
         monkeypatch.setenv("SPYRE_BUCKETED_DECODE", "0")
-        assert impl.record_bucketed_decode_graphs(make_bucketer(), torch.device("cpu")) == 0
+        assert impl.record_bucketed_decode_graphs(torch.device("cpu"), make_bucketer()) == 0
         assert impl._decode_fns == {}
 
     def test_skips_when_alibi_slopes_set(self, impl, monkeypatch):
@@ -291,7 +292,7 @@ class TestRecordBucketedDecodeGraphs:
         spy = MagicMock(wraps=bucketer.decode_variants)
         monkeypatch.setattr(bucketer, "decode_variants", spy)
 
-        assert impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu")) == 0
+        assert impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer) == 0
         assert impl._decode_fns == {}
         spy.assert_not_called()
 
@@ -301,7 +302,7 @@ class TestRecordBucketedDecodeGraphs:
         spy = MagicMock(wraps=bucketer.decode_variants)
         monkeypatch.setattr(bucketer, "decode_variants", spy)
 
-        assert impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu")) == 0
+        assert impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer) == 0
         assert impl._decode_fns == {}
         spy.assert_not_called()
 
@@ -318,7 +319,7 @@ class TestRecordBucketedDecodeGraphs:
             return real(b_seqs, b_blocks, *args, **kwargs)
 
         monkeypatch.setattr(impl, "_record_one_bucketed_decode", flaky)
-        recorded = impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu"))
+        recorded = impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer)
 
         assert recorded == calls["n"] - 1
         # The failed key is left uncached, so it can still compile on first use.
@@ -373,7 +374,7 @@ class TestBucketedDecodeRecompileLimit:
             return real(*args, **kwargs)
 
         impl._record_one_bucketed_decode = spy
-        impl.record_bucketed_decode_graphs(bucketer, torch.device("cpu"))
+        impl.record_bucketed_decode_graphs(torch.device("cpu"), bucketer)
 
         assert seen and min(seen) >= len(bucketer.decode_variants())
         assert torch._dynamo.config.accumulated_recompile_limit == before
@@ -387,5 +388,5 @@ class TestBucketedDecodeRecompileLimit:
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         with pytest.raises(RuntimeError):
-            impl.record_bucketed_decode_graphs(make_bucketer(), torch.device("cpu"))
+            impl.record_bucketed_decode_graphs(torch.device("cpu"), make_bucketer())
         assert torch._dynamo.config.accumulated_recompile_limit == before

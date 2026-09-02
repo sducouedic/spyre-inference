@@ -710,15 +710,13 @@ class TorchSpyreModelRunner(GPUModelRunner):
         if not envs.SPYRE_ATTN_RECORD:
             logger.info("Attention graph recording disabled (SPYRE_ATTN_RECORD=0)")
             return
-        if self.vllm_config.model_config.enforce_eager:
-            logger.info("Attention graph recording disabled (enforce_eager=True)")
-            return
         if self.compilation_config.mode is CompilationMode.NONE:
             logger.info("Attention graph recording disabled (CompilationMode.NONE)")
             return
-        if not self._spyre_kv_caches:
-            logger.warning("Attention graph recording skipped: KV cache not initialized yet.")
-            return
+        assert self._spyre_kv_caches, (
+            "Attention graph recording needs the KV cache, but "
+            "_spyre_kv_caches is empty: initialize_kv_cache_tensors() must run first."
+        )
 
         # Every layer keeps its own kernel cache, so each one is recorded. Layers
         # sharing a head configuration trace to the same graph, so only the first
@@ -735,14 +733,12 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 if not isinstance(impl, SpyreAttentionImpl):
                     continue
                 if bucketer is None:
-                    # block_size of the allocated pages ([num_blocks, block_size, ...]);
-                    # it lives on the metadata builder, not the impl.
-                    bucketer = SpyreAttnBucketer(self.vllm_config, kv_cache[0].shape[1])
+                    bucketer = SpyreAttnBucketer(self.vllm_config)
                     self._assert_builder_ladder_matches(bucketer)
                 logger.info("Recording attention graphs for layer %s...", layer_name)
-                total += impl.record_graphs(kv_cache, self._spyre_device, bucketer)
-                total += impl.record_kv_update_graphs(kv_cache, self._spyre_device, token_counts)
-                total += impl.record_bucketed_decode_graphs(bucketer, self._spyre_device)
+                total += impl.record_graphs(self._spyre_device, bucketer, kv_cache)
+                total += impl.record_kv_update_graphs(self._spyre_device, token_counts, kv_cache)
+                total += impl.record_bucketed_decode_graphs(self._spyre_device, bucketer)
             if bucketer is not None:
                 bucketer.mark_warmed_up()
         logger.info(

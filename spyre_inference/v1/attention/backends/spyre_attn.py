@@ -484,9 +484,10 @@ class SpyreAttentionMetadata(AttentionMetadata):
     active_block_indices: list[list[int]] | None = None
 
     # Global aligned query length for stable kernel compilation.
-    # max_query_len rounded up to QUERY_CHUNK_SIZE (32). All queries are
-    # padded to this length so the compiled attention kernel receives
-    # consistent tensor shapes across steps and sequences.
+    # max_query_len rounded up onto the bucketer's query ladder (1 for a
+    # decode-only batch). All queries are padded to this length so the compiled
+    # attention kernel receives consistent tensor shapes across steps and
+    # sequences.
     aligned_max_query_len: int = 0
 
     # Global aligned KV sequence length for stable kernel compilation.
@@ -554,6 +555,13 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # _attn_bucketer will derive its padding ladder from cache_config, so the
+        # two block sizes must agree or every request misses the recorded set.
+        assert kv_cache_spec.block_size == vllm_config.cache_config.block_size, (
+            f"kv cache spec block_size={kv_cache_spec.block_size} disagrees with "
+            f"cache_config.block_size={vllm_config.cache_config.block_size}; the "
+            "attention padding ladder is derived from the latter."
+        )
         self.block_size = kv_cache_spec.block_size
         self.head_size = kv_cache_spec.head_size
         self.sliding_window = getattr(kv_cache_spec, "sliding_window", None)
@@ -608,7 +616,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # request miss the recorded set, strictly worse than not padding.
         # (mark_warmed_up() is only ever called on the recorder's instance;
         # nothing reads is_warmed_up, so this one's flag stays False.)
-        self._attn_bucketer = SpyreAttnBucketer(vllm_config, self.block_size)
+        self._attn_bucketer = SpyreAttnBucketer(vllm_config)
 
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
@@ -881,11 +889,14 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             aligned_max_query_len = 1
         else:
             # Round to a recorded bucket so the kernel this batch needs was
-            # already compiled during warmup. Over the top bucket the bucketer
-            # returns None and we fall back to plain chunk alignment, which may
-            # compile on demand.
-            aligned_max_query_len = self._attn_bucketer.find_query_bucket(max_query_len) or (
-                (max_query_len + QUERY_CHUNK_SIZE - 1) // QUERY_CHUNK_SIZE * QUERY_CHUNK_SIZE
+            # already compiled during warmup. The top query bucket is
+            # max_num_batched_tokens, which bounds max_query_len, so a miss here
+            # means the ladder was built wrong (e.g. a truncated
+            # SPYRE_ATTN_QUERY_BUCKETS override).
+            aligned_max_query_len = self._attn_bucketer.find_query_bucket(max_query_len)
+            assert aligned_max_query_len is not None, (
+                f"no query bucket for max_query_len={max_query_len}; top bucket is "
+                f"{self._attn_bucketer.query_buckets[-1]}"
             )
         aligned_max_seq_len = (
             (max_seq_len + KV_LENGTH_ALIGNMENT - 1) // KV_LENGTH_ALIGNMENT * KV_LENGTH_ALIGNMENT
@@ -1355,9 +1366,9 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
     def record_graphs(
         self,
-        kv_cache: SpyrePagedKVCache,
         device: torch.device,
         bucketer: "SpyreAttnBucketer",
+        kv_cache: SpyrePagedKVCache,
     ) -> int:
         """Compile every attention variant the bucketer enumerates.
 
@@ -1524,9 +1535,9 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
     def record_kv_update_graphs(
         self,
-        kv_cache: SpyrePagedKVCache,
         device: torch.device,
         token_counts: list[int],
+        kv_cache: SpyrePagedKVCache,
     ) -> int:
         """Pre-compile ``_reshape_fn`` for each distinct token count.
 
@@ -1574,8 +1585,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
     def record_bucketed_decode_graphs(
         self,
-        bucketer: "SpyreAttnBucketer",
         device: torch.device,
+        bucketer: "SpyreAttnBucketer",
     ) -> int:
         """Compile every (bucket_num_seqs, bucket_num_blocks) the bucketed
         decode fast path (``_run_bucketed_decode_dispatch``) can dispatch to.

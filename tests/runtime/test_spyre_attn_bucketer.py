@@ -33,6 +33,7 @@ BLOCK_SIZE = 64
 
 def make_config(max_model_len=2048, max_num_batched_tokens=512, max_num_seqs=32):
     config = MagicMock()
+    config.cache_config.block_size = BLOCK_SIZE
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
     config.scheduler_config.max_num_seqs = max_num_seqs
@@ -41,7 +42,7 @@ def make_config(max_model_len=2048, max_num_batched_tokens=512, max_num_seqs=32)
 
 @pytest.fixture()
 def bucketer():
-    return SpyreAttnBucketer(make_config(), BLOCK_SIZE)
+    return SpyreAttnBucketer(make_config())
 
 
 @pytest.fixture(autouse=True)
@@ -174,7 +175,7 @@ class TestVariants:
 
     def test_count_stays_tractable_at_long_context(self):
         """A dense ladder here would be tens of thousands of Inductor compiles."""
-        b = SpyreAttnBucketer(make_config(32768, 2048), BLOCK_SIZE)
+        b = SpyreAttnBucketer(make_config(32768, 2048))
         assert len(b.variants()) < 500
 
 
@@ -182,13 +183,13 @@ class TestEnvOverride:
     def test_kv_ladder_override(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,512,4096")
         envs.clear_env_cache()
-        b = SpyreAttnBucketer(make_config(), BLOCK_SIZE)
+        b = SpyreAttnBucketer(make_config())
         assert b.kv_buckets == [128, 512, 4096]
 
     def test_query_ladder_override_is_sorted_and_deduped(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_QUERY_BUCKETS", "64,1,16,64")
         envs.clear_env_cache()
-        b = SpyreAttnBucketer(make_config(), BLOCK_SIZE)
+        b = SpyreAttnBucketer(make_config())
         assert b.query_buckets == [1, 16, 64]
 
     def test_parse_ladder_rejects_non_positive(self):
@@ -234,12 +235,12 @@ class TestDecodeVariants:
 
     def test_decode_num_seqs_buckets_is_powers_of_two_up_to_max(self):
         config = make_config(max_num_seqs=32)
-        b = SpyreAttnBucketer(config, BLOCK_SIZE)
+        b = SpyreAttnBucketer(config)
         assert b.decode_num_seqs_buckets == _powers_of_two_up_to(32)
 
     def test_decode_num_blocks_buckets_derived_from_max_model_len(self):
         config = make_config(max_model_len=2048)
-        b = SpyreAttnBucketer(config, BLOCK_SIZE)
+        b = SpyreAttnBucketer(config)
         max_num_blocks_per_seq = (2048 + BLOCK_SIZE - 1) // BLOCK_SIZE
         assert b.decode_num_blocks_buckets == _powers_of_two_up_to(max_num_blocks_per_seq)
 

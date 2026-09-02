@@ -21,7 +21,7 @@ enumerates the keys a run can reach so warmup can record them all up front.
 
 Separate from ``SpyreShapeBucketer``: that one dispatches a single
 ``num_tokens`` int for the model graph, whereas an attention variant is 2-D
-(a kv_len tier and a query_len chunk) plus two discrete flags.
+(a kv_len bucket and a query_len bucket) plus two discrete flags.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _ladder(step: int, limit: int, dense_steps: int = 1) -> list[int]:
     Doubling above the dense range is what keeps warmup affordable: the recorded
     set is a product of both axes, so a ladder of every multiple of ``step`` up
     to a 32k context is tens of thousands of variants. The dense head bounds the
-    round-up waste on the axis that carries real compute; above it each tier is
+    round-up waste on the axis that carries real compute; above it each bucket is
     at most 2x the one below, which the mask absorbs as ordinary padding.
     ``SPYRE_ATTN_KV_BUCKETS`` / ``SPYRE_ATTN_QUERY_BUCKETS`` override it.
     """
@@ -98,7 +98,8 @@ class SpyreAttnBucketer:
     returns None, and the caller falls back to compiling on demand.
     """
 
-    def __init__(self, vllm_config: VllmConfig, block_size: int) -> None:
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        block_size = vllm_config.cache_config.block_size
         self.block_size = block_size
         max_model_len = vllm_config.model_config.max_model_len
         max_batched = vllm_config.scheduler_config.max_num_batched_tokens
@@ -129,7 +130,7 @@ class SpyreAttnBucketer:
         # num_blocks is what the kernel specializes on. Deriving it from the kv
         # ladder rather than enumerating every integer up to max_model_len /
         # block_size is what keeps the recorded set small: one block count per
-        # kv tier, not one per possible block count.
+        # kv bucket, not one per possible block count.
         self._num_blocks_buckets: list[int] = sorted(
             {(kv + block_size - 1) // block_size for kv in self._kv_buckets}
         )
@@ -138,7 +139,7 @@ class SpyreAttnBucketer:
         # (_get_bucketed_decode_kernel): SpyreAttentionMetadataBuilder derives
         # these the same way, from max_num_seqs and max_model_len / block_size.
         # Kept distinct from the varlen ladders above — the decode kernel
-        # specializes on (num_seqs, num_blocks) directly, not on a kv_len tier.
+        # specializes on (num_seqs, num_blocks) directly, not on a kv_len bucket.
         max_num_blocks_per_seq = (max_model_len + block_size - 1) // block_size
         self._decode_num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
         self._decode_num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(
@@ -148,7 +149,8 @@ class SpyreAttnBucketer:
         self._is_warmed_up = False
 
         logger.info(
-            "SpyreAttnBucketer: %d kv tiers [%d..%d], %d query chunks [%d..%d], max num_blocks=%d",
+            "SpyreAttnBucketer: %d kv buckets [%d..%d], %d query buckets [%d..%d], "
+            "max num_blocks=%d",
             len(self._kv_buckets),
             self._kv_buckets[0],
             self._kv_buckets[-1],
@@ -219,7 +221,7 @@ class SpyreAttnBucketer:
         """Every variant worth recording, largest first.
 
         The two size axes are not independent: a sequence holding
-        ``query_len`` new tokens has ``kv_len >= query_len``, so a query chunk
+        ``query_len`` new tokens has ``kv_len >= query_len``, so a query bucket
         can only appear with block counts that can hold it. Taking the full
         cross product instead would record hundreds of thousands of unreachable
         variants at a 32k context.
