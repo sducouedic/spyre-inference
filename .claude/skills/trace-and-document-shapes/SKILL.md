@@ -25,7 +25,8 @@ Read the target file(s) in full before touching anything. Identify:
 
 - **Level-0 variables**: constants / config that hold for the whole scope — dims like `num_heads`, alignment constants, dtype, device. These almost never change between calls and anchor the top of the cheat sheet.
 - **Branch points**: `if`/dispatch logic that picks between code paths (e.g. bucketed vs per-seq, prefill vs decode, sliding-window vs full). Each reachable branch is a candidate scenario.
-- **Representative capture points**: for each function in scope, the 1-3 places whose local variables actually explain how shapes relate to each other — usually right after inputs are received, right before/after a reshape/gather/scatter, and right before dispatching into a compiled kernel. Don't instrument every line; a print flood is as useless to future-you as no prints.
+- **Representative capture points**: for each function in scope, the places whose local variables actually explain how shapes relate to each other — usually right after inputs are received, right before/after a reshape/gather/scatter, and right before dispatching into a compiled kernel. That's often 1-3 points for a simple function, but a longer or branchier one may need more — the target is full understanding of the scope, not a fixed count. Still don't instrument every line: skip variables that are trivially derived from ones you've already captured, or that don't change between the points you're already printing. A print flood is as useless to future-you as too few prints.
+- **Interesting, not just representative, inputs**: a capture point is only as good as the batch that hits it. Drive the workload with multiple concurrent requests of *different* prompt/generation lengths, not a single request or a batch of identical lengths — padding, bucketing, and ragged-batch logic are invisible when every sequence in the batch is the same size. If the scenario is user-supplied and under-specifies this, ask for or construct a mixed-length batch rather than capturing a degenerate uniform one.
 
 Do not start editing/running yet — form this plan mentally (or jot it in your own scratch notes), then move to instrumentation.
 
@@ -34,7 +35,7 @@ Do not start editing/running yet — form this plan mentally (or jot it in your 
 Add a small helper near the top of the file under test (after imports/logger setup) and call it at the capture points identified above. It must be:
 
 - **Env-var gated** so it's silent by default and never bothers anyone re-running the same file without the flag, e.g. `SPYRE_DEBUG_DUMP=1`.
-- **Step-limited** so a multi-step workload (e.g. 5 prompts × N decode steps) doesn't flood stdout — gate with a counter and an `SPYRE_DEBUG_STEPS=<n>` cap, incremented once per top-level call into the scope.
+- **Step-ranged** so a multi-step workload (e.g. 5 prompts × N decode steps) doesn't flood stdout — gate with a counter and an `SPYRE_DEBUG_STEP_START=<n>`/`SPYRE_DEBUG_STEP_END=<n>` window, incremented once per top-level call into the scope. Default the start to `0` so the common case is unchanged, but when the scope of interest only becomes active after some warmup (e.g. decode behavior after N prefill-only calls), push the start past the uninteresting steps instead of burning the window on them.
 - **Tensor-aware**: print shape, dtype, device, numel, and a bounded preview of values (e.g. first ~24 elements or `.tolist()` for small 1-D tensors) — never a full dump of a large tensor.
 
 A minimal helper (adapt names to the file's existing logging style — check for an existing `logger = init_logger(__name__)` and match its conventions rather than importing `logging` fresh):
@@ -42,11 +43,12 @@ A minimal helper (adapt names to the file's existing logging style — check for
 ```python
 import os
 _DBG_ON = os.environ.get("SPYRE_DEBUG_DUMP") == "1"
-_DBG_MAX_STEPS = int(os.environ.get("SPYRE_DEBUG_STEPS", "6"))
+_DBG_STEP_START = int(os.environ.get("SPYRE_DEBUG_STEP_START", "0"))
+_DBG_STEP_END = int(os.environ.get("SPYRE_DEBUG_STEP_END", "6"))
 _DBG_STEP = 0
 
 def _dbg(tag, **kv):
-    if not _DBG_ON or _DBG_STEP > _DBG_MAX_STEPS:
+    if not _DBG_ON or not (_DBG_STEP_START <= _DBG_STEP <= _DBG_STEP_END):
         return
     print(f"### DBG[{tag}]")
     for k, v in kv.items():
@@ -65,10 +67,12 @@ Increment `_DBG_STEP` once per call into the scope's top-level entry point (e.g.
 Use whatever the user actually runs for this code — an example script under `examples/`, the matching `.vscode/launch.json` config if one exists, or a targeted pytest invocation if the scope is better exercised by a unit test than an end-to-end script. Don't build a new harness if one already fits; don't over-debug the environment either — if the user says "it works for me, just run it," trust that and run it directly rather than pre-flighting imports/devices in isolation.
 
 ```bash
-SPYRE_DEBUG_DUMP=1 SPYRE_DEBUG_STEPS=6 <same env the user's config uses> \
+SPYRE_DEBUG_DUMP=1 SPYRE_DEBUG_STEP_START=0 SPYRE_DEBUG_STEP_END=6 <same env the user's config uses> \
   uv run --no-sync python <example script> <same args the user's config uses> \
   2>&1 | tee .claude/skills/trace-and-document-shapes/logs/<slug>-run.log
 ```
+
+Raise `SPYRE_DEBUG_STEP_START` past the warmup calls when the scope's interesting behavior only kicks in later (e.g. decode-only prints need the start pushed past the prefill steps) — don't spend the whole window capturing steps you already understand.
 
 Respect the single-accelerator constraint from `CLAUDE.md` — never run this concurrently with another Spyre-backed command.
 
@@ -109,7 +113,7 @@ Design conventions to reuse (don't re-derive from scratch each time, but do adap
 ## What NOT to do
 
 - Don't invent or extrapolate example values "because they're plausible" — every number in the sheet must trace back to a captured `### DBG[...]` block.
-- Don't instrument every line of the scope — pick the 1-3 capture points per function that actually explain the shape relationships, per step 1.
+- Don't instrument every line of the scope — pick the capture points per function that actually explain the shape relationships, per step 1, skipping variables that are trivial or unchanged since the last capture.
 - Don't leave debug prints in the source file after capture — always revert (step 4) before considering the task done.
 - Don't build a new run harness when an existing example script + launch config already exercises the scope — reuse what's there.
 - Don't skip a reachable branch/scenario to save time; a cheat sheet missing the bucketed-vs-per-seq (or equivalent) distinction defeats the purpose.
