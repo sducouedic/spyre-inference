@@ -735,7 +735,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 if not isinstance(impl, SpyreAttentionImpl):
                     continue
                 if bucketer is None:
-                    # block_size off the allocated pages ([num_blocks, block_size, ...]);
+                    # block_size of the allocated pages ([num_blocks, block_size, ...]);
                     # it lives on the metadata builder, not the impl.
                     bucketer = SpyreAttnBucketer(self.vllm_config, kv_cache[0].shape[1])
                     self._assert_builder_ladder_matches(bucketer)
