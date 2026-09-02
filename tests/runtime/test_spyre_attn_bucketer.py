@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from spyre_inference import envs
-from spyre_inference.v1.attention.backends.spyre_attn import _MIN_SEQS_BUCKET, _powers_of_two_up_to
+from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_to
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucket,
     SpyreAttnBucketer,
@@ -30,14 +30,11 @@ from spyre_inference.v1.attention.spyre_attn_bucketer import (
 BLOCK_SIZE = 64
 
 
-def make_config(
-    max_model_len=2048, max_num_batched_tokens=512, max_num_seqs=32, block_size=BLOCK_SIZE
-):
+def make_config(max_model_len=2048, max_num_batched_tokens=512, block_size=BLOCK_SIZE):
     config = MagicMock()
     config.cache_config.block_size = block_size
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
-    config.scheduler_config.max_num_seqs = max_num_seqs
     return config
 
 
@@ -243,45 +240,3 @@ class TestBucketKey:
             num_blocks=4, padded_query_len=32, store_mode="index", needs_gather=True
         )
         assert b.key == (4, 32, "index", True)
-
-
-class TestDecodeVariants:
-    def test_decode_variants_no_duplicates(self, bucketer):
-        variants = bucketer.decode_variants()
-        assert len(variants) == len(set(variants))
-
-    def test_decode_variants_excludes_below_min_seqs_bucket(self, bucketer):
-        for num_seqs, _ in bucketer.decode_variants():
-            assert num_seqs >= _MIN_SEQS_BUCKET
-
-    def test_decode_variants_largest_first(self, bucketer):
-        variants = bucketer.decode_variants()
-        assert variants[0][0] == max(v[0] for v in variants)
-        max_seqs_tier = [v for v in variants if v[0] == variants[0][0]]
-        assert max_seqs_tier[0][1] == max(v[1] for v in max_seqs_tier)
-
-    def test_decode_num_seqs_buckets_is_powers_of_two_up_to_max(self):
-        config = make_config(max_num_seqs=32)
-        b = SpyreAttnBucketer(config)
-        assert b.decode_num_seqs_buckets == _powers_of_two_up_to(32)
-
-    def test_decode_num_blocks_buckets_derived_from_max_model_len(self):
-        config = make_config(max_model_len=2048)
-        b = SpyreAttnBucketer(config)
-        max_num_blocks_per_seq = (2048 + BLOCK_SIZE - 1) // BLOCK_SIZE
-        assert b.decode_num_blocks_buckets == _powers_of_two_up_to(max_num_blocks_per_seq)
-
-    @pytest.mark.parametrize("num_seqs", [1, 3, 4, 5, 8, 17, 32])
-    @pytest.mark.parametrize("num_blocks", [1, 2, 3, 17, 32])
-    def test_decode_variants_key_matches_dispatch_key(self, bucketer, num_seqs, num_blocks):
-        """The acceptance criterion: no reachable bucketed-decode dispatch may
-        miss the recorded set (mirrors
-        TestDispatch.test_dispatch_always_lands_on_a_recorded_variant)."""
-        if num_seqs < _MIN_SEQS_BUCKET:
-            pytest.skip("below _MIN_SEQS_BUCKET, the per-seq loop is used instead")
-
-        b_seqs = bucketer._round_up(num_seqs, list(bucketer.decode_num_seqs_buckets))
-        b_blocks = bucketer._round_up(num_blocks, list(bucketer.decode_num_blocks_buckets))
-        assert b_seqs is not None and b_blocks is not None
-
-        assert (b_seqs, b_blocks) in bucketer.decode_variants()
