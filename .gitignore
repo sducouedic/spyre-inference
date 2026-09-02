@@ -49,6 +49,10 @@ docs/examples
 # PR body drafts (prepare-pull-request skill)
 .pr_drafts/
 
+# generated run logs/HTML (trace-and-document-shapes skill)
+.claude/skills/trace-and-document-shapes/logs/*
+!.claude/skills/trace-and-document-shapes/logs/.gitkeep
+
 # tmp files of agent harness
 .plans/
 .kilo/
