@@ -85,7 +85,7 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     SpyreAttentionImpl,
     SpyrePagedKVCache,
 )
-from spyre_inference.v1.attention.spyre_attn_bucketer import SpyreAttnBucketer
+from spyre_inference.v1.attention.spyre_attn_bucketer import get_attn_bucketer
 from spyre_inference.v1.pool import (
     configure_pooling_for_spyre,
     copy_pooler_output_to_cpu,
@@ -725,52 +725,24 @@ class TorchSpyreModelRunner(GPUModelRunner):
         static_ctx = self.compilation_config.static_forward_context
         t0 = time.time()
         total = 0
+        # The same instance the metadata builders dispatch against, so every
+        # bucket recorded here is a bucket build() can actually produce.
+        bucketer = get_attn_bucketer(self.vllm_config)
         with _set_spyre_compilation_settings(self.vllm_config):
-            bucketer: SpyreAttnBucketer | None = None
             for layer_name, kv_cache in self._spyre_kv_caches.items():
                 layer = static_ctx.get(layer_name)
                 impl = getattr(layer, "impl", None)
                 if not isinstance(impl, SpyreAttentionImpl):
                     continue
-                if bucketer is None:
-                    bucketer = SpyreAttnBucketer(self.vllm_config)
-                    self._assert_builder_buckets_match(bucketer)
                 logger.info("Recording attention graphs for layer %s...", layer_name)
                 total += impl.record_graphs(self._spyre_device, bucketer, kv_cache)
                 total += impl.record_kv_update_graphs(self._spyre_device, token_counts, kv_cache)
-            if bucketer is not None:
-                bucketer.mark_warmed_up()
+            bucketer.mark_warmed_up()
         logger.info(
             "Attention graph recording complete: %d graphs in %.3fs.",
             total,
             time.time() - t0,
         )
-
-    def _assert_builder_buckets_match(self, bucketer: SpyreAttnBucketer) -> None:
-        """Fail loudly if the metadata builder's buckets differ from the recorder's.
-
-        The builder rounds each sequence's num_blocks onto its own bucketer's
-        buckets. If the two diverge, *every* request pads to a block count that
-        was never recorded — strictly worse than not padding at all.
-        """
-        for group in self._attn_group_iterator():
-            builder = group.get_metadata_builder()
-            other = getattr(builder, "_attn_bucketer", None)
-            if other is None:
-                continue
-            if (other.block_size, other.num_blocks_buckets) != (
-                bucketer.block_size,
-                bucketer.num_blocks_buckets,
-            ):
-                raise RuntimeError(
-                    "Attention bucketer buckets diverged: recorder has "
-                    f"block_size={bucketer.block_size} "
-                    f"num_blocks={bucketer.num_blocks_buckets}, builder "
-                    f"{type(builder).__name__} has block_size={other.block_size} "
-                    f"num_blocks={other.num_blocks_buckets}. build() pads onto the "
-                    "builder's buckets, so a mismatch means no request hits a "
-                    "recorded kernel."
-                )
 
     def _determine_batch_execution_and_padding(
         self,

@@ -14,6 +14,7 @@
 
 """Unit tests for SpyreAttnBucketer. No hardware required."""
 
+import gc
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock
 
@@ -24,7 +25,9 @@ from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_t
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucket,
     SpyreAttnBucketer,
+    _bucketers,
     _parse_buckets,
+    get_attn_bucketer,
 )
 
 BLOCK_SIZE = 64
@@ -240,3 +243,31 @@ class TestBucketKey:
             num_blocks=4, padded_query_len=32, store_mode="index", needs_gather=True
         )
         assert b.key == (4, 32, "index", True)
+
+
+class TestSharedInstance:
+    """get_attn_bucketer is what keeps the builder and the recorder in step."""
+
+    def test_same_config_returns_the_same_object(self):
+        config = make_config()
+        assert get_attn_bucketer(config) is get_attn_bucketer(config)
+
+    def test_distinct_configs_get_distinct_bucketers(self):
+        first = get_attn_bucketer(make_config(max_model_len=2048))
+        second = get_attn_bucketer(make_config(max_model_len=4096))
+        assert first is not second
+        assert first.kv_buckets != second.kv_buckets
+
+    def test_shared_instance_shares_warmed_up_flag(self):
+        config = make_config()
+        get_attn_bucketer(config).mark_warmed_up()
+        assert get_attn_bucketer(config).is_warmed_up
+
+    def test_entry_is_dropped_when_the_config_dies(self):
+        config = make_config()
+        key = id(config)
+        get_attn_bucketer(config)
+        assert key in _bucketers
+        del config
+        gc.collect()
+        assert key not in _bucketers

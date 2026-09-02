@@ -29,7 +29,10 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     SpyreAttentionImpl,
     SpyrePagedKVCache,
 )
-from spyre_inference.v1.attention.spyre_attn_bucketer import SpyreAttnBucketer
+from spyre_inference.v1.attention.spyre_attn_bucketer import (
+    SpyreAttnBucketer,
+    get_attn_bucketer,
+)
 
 pytestmark = pytest.mark.attention
 
@@ -137,13 +140,13 @@ class TestRecordGraphs:
 
         from tests.attention.test_spyre_attn import _padded_mask_metadata
 
-        # Built from the live config, not make_bucketer's narrower stand-in: the
-        # metadata below comes from a real SpyreAttentionMetadataBuilder, which
-        # constructs its own bucketer from that same config. In production the two
-        # instances are identical by construction; hand-narrowed buckets here
-        # would only test a divergence that cannot happen.
+        # The live config's shared bucketer, not make_bucketer's narrower
+        # stand-in: the metadata below comes from a real
+        # SpyreAttentionMetadataBuilder, which dispatches against this very
+        # object. Hand-narrowed buckets here would test a divergence that
+        # get_attn_bucketer makes impossible.
         vllm_config = get_current_vllm_config()
-        bucketer = SpyreAttnBucketer(vllm_config)
+        bucketer = get_attn_bucketer(vllm_config)
         impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
         snapshot = len(impl._attn_fns)
         assert snapshot > 0
