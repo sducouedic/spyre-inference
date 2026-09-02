@@ -118,7 +118,7 @@ class TestRecordGraphs:
         assert len(impl._attn_fns) == after_first
 
     def test_skips_variants_exceeding_the_page_allocation(self, impl, kv_cache):
-        """A ladder sized from max_model_len can outrun a small KV cache."""
+        """Buckets sized from max_model_len can outrun a small KV cache."""
         bucketer = make_bucketer(max_model_len=4096)
         impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
 
@@ -129,14 +129,22 @@ class TestRecordGraphs:
         """The acceptance criterion, driven from real builder metadata.
 
         ``test_dispatch_after_recording_does_not_grow_the_cache`` asks the
-        bucketer what it would dispatch; this one builds metadata for off-ladder
+        bucketer what it would dispatch; this one builds metadata for unbucketed
         kv_lens through ``SpyreAttentionMetadataBuilder`` and dispatches on the
         block counts ``build()`` actually produced. Without KV padding, every one
         of these misses the recorded set and compiles.
         """
+        from vllm.config import get_current_vllm_config
+
         from tests.attention.test_spyre_attn import _padded_mask_metadata
 
-        bucketer = make_bucketer(max_model_len=NUM_PAGES * BLOCK_SIZE)
+        # Built from the live config, not make_bucketer's narrower stand-in: the
+        # metadata below comes from a real SpyreAttentionMetadataBuilder, which
+        # constructs its own bucketer from that same config. In production the two
+        # instances are identical by construction; hand-narrowed buckets here
+        # would only test a divergence that cannot happen.
+        vllm_config = get_current_vllm_config()
+        bucketer = SpyreAttnBucketer(vllm_config)
         impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
         snapshot = len(impl._attn_fns)
         assert snapshot > 0
@@ -206,7 +214,7 @@ class TestRecordKvUpdateGraphs:
 
 class TestRecompileLimit:
     def test_limit_is_raised_during_recording_and_restored(self, impl, kv_cache):
-        """Dynamo's accumulated limit is global, so a ladder wider than it would
+        """Dynamo's accumulated limit is global, so more buckets than it allows would
         otherwise stop compiling partway through and fall back to eager."""
         bucketer = make_bucketer()
         before = torch._dynamo.config.accumulated_recompile_limit
@@ -360,7 +368,7 @@ class TestRecordBucketedDecodeGraphs:
 
 class TestBucketedDecodeRecompileLimit:
     def test_limit_is_raised_during_recording_and_restored(self, impl, monkeypatch):
-        """Same global-limit caveat as record_graphs: a lattice wider than the
+        """Same global-limit caveat as record_graphs: more buckets than the
         accumulated limit would otherwise stop compiling partway through."""
         monkeypatch.setenv("SPYRE_BUCKETED_DECODE", "1")
         bucketer = make_bucketer()

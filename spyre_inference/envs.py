@@ -57,11 +57,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # warmup, so no request pays an Inductor compile mid-serving. "0" falls back to
     # compiling each variant lazily on first use.
     "SPYRE_ATTN_RECORD": lambda: bool(int(os.getenv("SPYRE_ATTN_RECORD", "1"))),
-    # Comma-separated kv_len tiers to record, overriding the default ladder derived
-    # from KV_LENGTH_ALIGNMENT up to max_model_len. Unset uses the default.
+    # Comma-separated kv_len buckets to record, unset uses the default buckets of
+    # powers of two from block_size up to max_model_len.
     "SPYRE_ATTN_KV_BUCKETS": lambda: os.getenv("SPYRE_ATTN_KV_BUCKETS"),
-    # Comma-separated query_len chunks to record, overriding the default ladder
-    # [1] + multiples of QUERY_CHUNK_SIZE up to max_num_batched_tokens.
+    # Comma-separated query_len buckets to record, unset uses the default buckets
+    # [1] + multiples of min(512, max_num_batched_tokens) up to max_num_batched_tokens.
     "SPYRE_ATTN_QUERY_BUCKETS": lambda: os.getenv("SPYRE_ATTN_QUERY_BUCKETS"),
     # When "1", enables the bucketed multi-sequence decode kernel. Off by default
     # pending performance characterisation at small batch sizes (num_seqs <= 4).

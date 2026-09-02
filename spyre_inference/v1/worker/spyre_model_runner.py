@@ -734,7 +734,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
                     continue
                 if bucketer is None:
                     bucketer = SpyreAttnBucketer(self.vllm_config)
-                    self._assert_builder_ladder_matches(bucketer)
+                    self._assert_builder_buckets_match(bucketer)
                 logger.info("Recording attention graphs for layer %s...", layer_name)
                 total += impl.record_graphs(self._spyre_device, bucketer, kv_cache)
                 total += impl.record_kv_update_graphs(self._spyre_device, token_counts, kv_cache)
@@ -747,11 +747,11 @@ class TorchSpyreModelRunner(GPUModelRunner):
             time.time() - t0,
         )
 
-    def _assert_builder_ladder_matches(self, bucketer: SpyreAttnBucketer) -> None:
-        """Fail loudly if the metadata builder's ladder differs from the recorder's.
+    def _assert_builder_buckets_match(self, bucketer: SpyreAttnBucketer) -> None:
+        """Fail loudly if the metadata builder's buckets differ from the recorder's.
 
         The builder rounds each sequence's num_blocks onto its own bucketer's
-        ladder. If the two diverge, *every* request pads to a block count that
+        buckets. If the two diverge, *every* request pads to a block count that
         was never recorded — strictly worse than not padding at all.
         """
         for group in self._attn_group_iterator():
@@ -764,12 +764,12 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 bucketer.num_blocks_buckets,
             ):
                 raise RuntimeError(
-                    "Attention bucketer ladders diverged: recorder has "
+                    "Attention bucketer buckets diverged: recorder has "
                     f"block_size={bucketer.block_size} "
                     f"num_blocks={bucketer.num_blocks_buckets}, builder "
                     f"{type(builder).__name__} has block_size={other.block_size} "
                     f"num_blocks={other.num_blocks_buckets}. build() pads onto the "
-                    "builder's ladder, so a mismatch means no request hits a "
+                    "builder's buckets, so a mismatch means no request hits a "
                     "recorded kernel."
                 )
 

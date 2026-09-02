@@ -128,7 +128,7 @@ def _build_metadata(
     vllm_config = get_current_vllm_config()
     vllm_config.model_config.get_num_attention_heads = Mock(return_value=num_query_heads)
     vllm_config.model_config.get_num_kv_heads = Mock(return_value=num_kv_heads)
-    # The builder asserts these agree, and derives its padding ladder from the
+    # The builder asserts these agree, and derives its padding buckets from the
     # cache_config one, so a test block_size has to be set in both places.
     vllm_config.cache_config.block_size = block_size
 
@@ -394,7 +394,7 @@ def _run_spyre_attn_test(
     )
     kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
 
-    # Widened to the recorder's num_blocks ladder, as a real engine's block table
+    # Widened to the recorder's num_blocks buckets, as a real engine's block table
     # is: build() clamps its KV padding to this width, so a table sized to exactly
     # what the sequences need would suppress the padding under test. The extra
     # entries point at arbitrary (garbage) pages on purpose — padded blocks are
@@ -402,8 +402,8 @@ def _run_spyre_attn_test(
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     from vllm.config import get_current_vllm_config
 
-    ladder = SpyreAttnBucketer(get_current_vllm_config()).num_blocks_buckets
-    padded_width = SpyreAttnBucketer._round_up(max_num_blocks_per_seq, ladder)
+    buckets = SpyreAttnBucketer(get_current_vllm_config()).num_blocks_buckets
+    padded_width = SpyreAttnBucketer._round_up(max_num_blocks_per_seq, buckets)
     if padded_width is not None:
         max_num_blocks_per_seq = max(max_num_blocks_per_seq, padded_width)
     block_tables = torch.randint(
@@ -562,7 +562,7 @@ def _run_spyre_attn_test(
         pytest.param([(32, 256), (64, 512)], id="batch_prefill(2seqs)"),
         pytest.param([(64, 512), (32, 256)], id="batch_prefill(2seqs_swapped)"),
         pytest.param([(1, 256), (32, 256)], id="mixed(decode+prefill)"),
-        # Off-ladder kv_lens: build() appends fully-masked padded blocks, which
+        # Unbucketed kv_lens: build() appends fully-masked padded blocks, which
         # must leave the output bit-identical.
         pytest.param([(1, 300)], id="kv_padded_decode(q=1,kv=300)"),
         pytest.param([(32, 65)], id="kv_padded_prefill(q=32,kv=65)"),
@@ -911,7 +911,7 @@ def test_spyre_attn_soft_cap(
         # context_len on a block boundary vs. mid-block hits different boundary tiles.
         pytest.param([(64, 256)], id="chunk_on_block_boundary(ctx=192)"),
         pytest.param([(64, 200)], id="chunk_mid_block(ctx=136)"),
-        # Chunk not a multiple of QUERY_CHUNK_SIZE (32).
+        # Chunk length that is not on a query bucket boundary.
         pytest.param([(48, 300)], id="unaligned_chunk(ctx=252)"),
         pytest.param([(64, 256), (1, 256)], id="batch_chunk+decode"),
     ],
@@ -1697,7 +1697,7 @@ def _padded_mask_metadata(
     """Build metadata on CPU for a list of (query_len, kv_len) sequences.
 
     ``max_num_blocks`` sets the block-table width, which build() uses as the
-    ceiling when rounding block counts onto the recorder's ladder. It defaults
+    ceiling when rounding block counts onto the recorder's buckets. It defaults
     to what the sequences need, i.e. no headroom; a test that wants padding to
     actually happen must ask for a wider table, as a real engine's is.
     """
@@ -1770,7 +1770,7 @@ def test_padded_mask_rows_equal_last_real_row(default_vllm_config, seq_lens):
         pytest.param([(7, 256)], id="prefill_q7"),
         pytest.param([(1, 320)], id="decode_q1"),
         pytest.param([(40, 512)], id="prefill_q40"),
-        # Off-ladder kv_lens, so build() appends fully-masked padded blocks:
+        # Unbucketed kv_lens, so build() appends fully-masked padded blocks:
         # 65 -> 2 real blocks padded to 4, 300 -> 5 to 8, 513 -> 9 to 16.
         pytest.param([(7, 65)], id="prefill_q7_padded_blocks"),
         pytest.param([(1, 300)], id="decode_q1_padded_blocks"),
@@ -1879,11 +1879,11 @@ def test_attn_fn_cache_key_is_shape_only(default_vllm_config):
     assert len(impl._attn_fns) == 2
 
 
-def _num_blocks_ladder(block_size: int = 64) -> list[int]:
-    """The recorder's num_blocks ladder for the fixture's config.
+def _num_blocks_buckets(block_size: int = 64) -> list[int]:
+    """The recorder's num_blocks buckets for the fixture's config.
 
     Sets ``cache_config.block_size`` for the same reason ``_build_metadata``
-    does: the bucketer derives the ladder from it, so a caller naming a
+    does: the bucketer derives the buckets from it, so a caller naming a
     ``block_size`` has to put it where the bucketer reads it.
     """
     from vllm.config import get_current_vllm_config
@@ -1902,12 +1902,12 @@ def _num_blocks_ladder(block_size: int = 64) -> list[int]:
         pytest.param(1025, 32, id="kv1025_to_32"),
     ],
 )
-def test_padded_num_blocks_lands_on_the_ladder(default_vllm_config, kv_len, expected):
+def test_padded_num_blocks_lands_on_a_bucket(default_vllm_config, kv_len, expected):
     torch.set_default_device("cpu")
-    ladder = _num_blocks_ladder()
-    assert expected in ladder
+    buckets = _num_blocks_buckets()
+    assert expected in buckets
 
-    metadata = _padded_mask_metadata([(1, kv_len)], max_num_blocks=ladder[-1])
+    metadata = _padded_mask_metadata([(1, kv_len)], max_num_blocks=buckets[-1])
 
     assert metadata.padded_num_blocks == [expected]
     assert len(metadata.attention_mask_tiles[0]) == expected
@@ -1922,7 +1922,7 @@ def test_padded_tiles_are_finfo_min_and_prefix_is_unchanged(default_vllm_config)
     real_blocks = (kv_len + block_size - 1) // block_size
 
     padded = _padded_mask_metadata(
-        [(query_len, kv_len)], block_size=block_size, max_num_blocks=_num_blocks_ladder()[-1]
+        [(query_len, kv_len)], block_size=block_size, max_num_blocks=_num_blocks_buckets()[-1]
     )
     assert padded.padded_num_blocks[0] > real_blocks
 
@@ -1946,7 +1946,7 @@ def test_padded_tiles_are_finfo_min_and_prefix_is_unchanged(default_vllm_config)
 def test_zero_kv_len_stays_at_zero_blocks(default_vllm_config):
     """Zero real blocks must not be padded: a fully-masked tile would divide by zero."""
     torch.set_default_device("cpu")
-    metadata = _padded_mask_metadata([(1, 0), (1, 65)], max_num_blocks=_num_blocks_ladder()[-1])
+    metadata = _padded_mask_metadata([(1, 0), (1, 65)], max_num_blocks=_num_blocks_buckets()[-1])
 
     assert metadata.padded_num_blocks[0] == 0
     assert metadata.attention_mask_tiles[0] == []
@@ -1954,11 +1954,11 @@ def test_zero_kv_len_stays_at_zero_blocks(default_vllm_config):
 
 
 def test_padding_clamped_to_block_table_width(default_vllm_config):
-    """A ladder tier wider than the allocation falls back to the real count."""
+    """A bucket wider than the allocation falls back to the real count."""
     torch.set_default_device("cpu")
     block_size = 64
     # kv_len 130 -> 3 real blocks; the block table is only 3 wide, so the
-    # ladder's 4 does not fit and build() must leave the count alone.
+    # bucket of 4 does not fit and build() must leave the count alone.
     metadata = _padded_mask_metadata([(1, 130)], block_size=block_size)
 
     width = metadata.block_table.shape[1]
@@ -1970,7 +1970,7 @@ def test_padding_clamped_to_block_table_width(default_vllm_config):
 def test_sliding_window_is_left_unpadded(default_vllm_config):
     torch.set_default_device("cpu")
     metadata = _padded_mask_metadata(
-        [(7, 300)], block_size=64, sliding_window=128, max_num_blocks=_num_blocks_ladder()[-1]
+        [(7, 300)], block_size=64, sliding_window=128, max_num_blocks=_num_blocks_buckets()[-1]
     )
     assert metadata.padded_num_blocks is None
 
@@ -1983,7 +1983,7 @@ def test_bucketed_decode_uses_real_block_counts(default_vllm_config, enable_buck
     # two counts disagree here.
     seqs = [(1, 65)] * 4
     metadata = _padded_mask_metadata(
-        seqs, block_size=block_size, max_num_blocks=_num_blocks_ladder(block_size)[-1]
+        seqs, block_size=block_size, max_num_blocks=_num_blocks_buckets(block_size)[-1]
     )
 
     assert metadata.padded_num_blocks == [4] * len(seqs)
