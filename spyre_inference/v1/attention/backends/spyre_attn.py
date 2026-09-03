@@ -207,9 +207,34 @@ def resolve_store_mode(fused_store_ok: bool, output_rows: int) -> str:
     return "copy" if output_rows == 1 else "index"
 
 
+def _out_rows_for_store_mode(store_mode: str, q_len: int) -> int | None:
+    """Row count of the fused-store destination for a given store mode.
+
+    None for "none": that mode writes nothing, so there is no buffer to size.
+    Mirrors the real path's store, which never resizes its own caller-supplied
+    buffer -- this is `_record_one`'s single source of truth for the dummy
+    buffer it fabricates instead.
+    """
+    if store_mode == "none":
+        return None
+    return 1 if store_mode == "copy" else q_len + 1
+
+
+def _alibi_tile_shape(
+    num_kv_heads: int, num_queries_per_kv: int, block_size: int
+) -> tuple[int, int, int, int]:
+    """Shape of one per-block ALiBi bias tile; see _online_softmax_attention's derivation."""
+    return (num_kv_heads, num_queries_per_kv, 1, block_size)
+
+
 # ---------------------------------------------------------------------------
 # Compilable factory functions
 # ---------------------------------------------------------------------------
+
+
+def _stick_aligned_len(n: int) -> int:
+    """Round n up to a whole number of int32 sticks (see INT32_ELEMS_PER_STICK)."""
+    return (n + INT32_ELEMS_PER_STICK - 1) // INT32_ELEMS_PER_STICK * INT32_ELEMS_PER_STICK
 
 
 def _build_query_row_tables(
@@ -217,9 +242,7 @@ def _build_query_row_tables(
 ) -> list[torch.Tensor]:
     num_seqs = attn_metadata.num_seqs
     aligned = attn_metadata.aligned_max_query_len
-    index_len = (
-        (aligned + INT32_ELEMS_PER_STICK - 1) // INT32_ELEMS_PER_STICK * INT32_ELEMS_PER_STICK
-    )
+    index_len = _stick_aligned_len(aligned)
     starts = attn_metadata.query_start_loc[:num_seqs].cpu()
     lens = attn_metadata.query_start_loc[1 : num_seqs + 1].cpu() - starts
     q_pos = torch.arange(aligned)
@@ -994,7 +1017,9 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             )
             # Pre-tile the mask: split into per-block tiles.
             # Query dimension is uniform (aligned_max_query_len) for all sequences,
-            # so tiling only follows the KV dimension.
+            # so tiling only follows the KV dimension. Each tile is
+            # [aligned_max_query_len, block_size] -- _record_one builds
+            # same-shaped zero tiles by hand; keep them in sync.
             for s in range(num_seqs):
                 seq_tiles: list[torch.Tensor] = []
                 for b in range(padded_num_blocks[s]):
@@ -1034,6 +1059,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 attention_mask_tiles.append(tiles)
 
         # Gather indices for the attention loop, one row per active block.
+        # Shape [num_blocks, INT32_ELEMS_PER_STICK] per sequence -- _record_one
+        # builds a same-shaped dummy table by hand; keep them in sync.
         num_active = [len(tiles) for tiles in attention_mask_tiles]
         page_index_table_cpu = torch.zeros(
             num_seqs, max(num_active), INT32_ELEMS_PER_STICK, dtype=torch.int32
@@ -1523,9 +1550,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # Row table width is stick-aligned exactly as _build_query_row_tables does.
         row_table = None
         if bucket.needs_gather or bucket.store_mode == "index":
-            index_len = (
-                (q_len + INT32_ELEMS_PER_STICK - 1) // INT32_ELEMS_PER_STICK
-            ) * INT32_ELEMS_PER_STICK
+            index_len = _stick_aligned_len(q_len)
             rows = torch.zeros(index_len, dtype=torch.int32)
             rows[:q_len] = torch.arange(q_len, dtype=torch.int32)
             row_table = convert(rows, device=device)
@@ -1545,27 +1570,22 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         alibi_bias_tiles = None
         if self.alibi_slopes is not None:
+            tile_shape = _alibi_tile_shape(self.num_kv_heads, self.num_queries_per_kv, block_size)
             alibi_bias_tiles = [
                 convert(
-                    torch.zeros(
-                        self.num_kv_heads,
-                        self.num_queries_per_kv,
-                        1,
-                        block_size,
-                        dtype=self.model_dtype,
-                    ),
+                    torch.zeros(tile_shape, dtype=self.model_dtype),
                     device=device,
                 )
                 for _ in range(bucket.num_blocks)
             ]
 
         out = None
-        if bucket.store_mode != "none":
-            # "copy" is the one-token batch (resolve_store_mode), so its
-            # destination is a single row; "index" scatters into a strictly
-            # larger buffer, which is what makes its store indirect at runtime.
-            assert bucket.store_mode != "copy" or q_len == 1
-            out_rows = 1 if bucket.store_mode == "copy" else q_len + 1
+        # "copy" is the one-token batch (resolve_store_mode), so its
+        # destination is a single row; "index" scatters into a strictly
+        # larger buffer, which is what makes its store indirect at runtime.
+        assert bucket.store_mode != "copy" or q_len == 1
+        out_rows = _out_rows_for_store_mode(bucket.store_mode, q_len)
+        if out_rows is not None:
             out = convert(
                 torch.zeros(out_rows, self.num_heads, self.head_size, dtype=self.model_dtype),
                 device=device,
@@ -1833,9 +1853,14 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             # Matches vllm/v1/attention/ops/triton_attention_helpers.py::apply_alibi_to_score
             # (alibi_offset = seq_offset - context_len) — the production Triton path.
             #
-            # Per-tile shape: [num_kv_heads, num_queries_per_kv, 1, block_size].
+            # Per-tile shape enforced below via _alibi_tile_shape, the same
+            # helper _record_one's dummy tiles use -- a mismatch here fails
+            # loudly instead of silently drifting from the dummy shape.
             alibi_bias_tiles: list[torch.Tensor] | None = None
             if self.alibi_slopes is not None:
+                tile_shape = _alibi_tile_shape(
+                    self.num_kv_heads, self.num_queries_per_kv, block_size
+                )
                 context_len = kv_len - query_len
                 alibi_bias_tiles = []
                 for b in active_bs:
@@ -1846,6 +1871,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                     )
                     rel = (kv_pos - context_len).view(1, 1, 1, block_size)
                     bias = self.alibi_slopes * rel
+                    assert bias.shape == tile_shape
                     alibi_bias_tiles.append(convert(bias, device=_target_device))
 
             needs_gather = resolve_needs_gather(
