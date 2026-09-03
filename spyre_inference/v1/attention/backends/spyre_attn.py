@@ -682,13 +682,14 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             self._zero_tile_shape = shape
         return self._zero_tile
 
-    def _pad_num_blocks(self, num_blocks: int, max_blocks_available: int) -> int:
+    def _pad_num_blocks(self, num_blocks: int) -> int:
         """Round an active-block count up onto the recorder's num_blocks buckets.
 
-        Returns the count unpadded when the bucket that fits is wider than the
-        block table, which costs a compile on demand but is otherwise correct.
-        Overrunning the buckets entirely is a different matter and asserts: see
-        below.
+        block_table is allocated by vLLM with width ceil(max_model_len /
+        block_size) for the engine's lifetime (never narrowed per batch), so the
+        padded bucket -- itself bounded by max_model_len -- always fits. No
+        unpadded fallback is needed; overrunning the buckets entirely is a
+        different matter and asserts: see below.
         """
         if num_blocks == 0:
             # Zero real blocks must stay zero: forward() early-outs to a zero
@@ -707,12 +708,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             f"{self._attn_bucketer.num_blocks_buckets[-1]}, which should cover "
             f"ceil(max_model_len / block_size)."
         )
-        if padded > max_blocks_available:
-            # Routine, not an error: the block table is sized to the batch's own
-            # kv extent, so a bucket wider than it is common on short sequences.
-            # Unpadded is what this code did before bucketing existed -- correct,
-            # just a compile on demand.
-            return num_blocks
         assert padded >= num_blocks
         return padded
 
@@ -959,10 +954,10 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # SPYRE_ATTN_QUERY_BUCKETS override -- and that bounds max_query_len,
             # so a miss here means a batch outside the scheduler's own contract.
             #
-            # An assert rather than a fallback, unlike _pad_num_blocks: this is a
-            # tensor shape (it sizes the mask tiles and the query-row gather), so
-            # there is no unpadded value to carry on with -- None would only
-            # surface as a TypeError inside _build_attention_mask.
+            # An assert, like _pad_num_blocks: this is a tensor shape (it sizes
+            # the mask tiles and the query-row gather), so there is no unpadded
+            # value to carry on with -- None would only surface as a TypeError
+            # inside _build_attention_mask.
             aligned_max_query_len = self._attn_bucketer.find_query_bucket(max_query_len)
             assert aligned_max_query_len is not None, (
                 f"no query bucket for max_query_len={max_query_len}; top bucket is "
@@ -987,12 +982,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # the causal context_len and the ALiBi offset, all of which need the
             # true length. The padded count is carried separately and consumed
             # only as a block/tile/page-index count.
-            max_blocks_available = block_table.shape[1]
             for s in range(num_seqs):
                 n = (int(seq_lens[s].item()) + block_size - 1) // block_size
                 real_num_blocks.append(n)
             padded_num_blocks = [
-                self._pad_num_blocks(n, max_blocks_available) for n in real_num_blocks
+                self._pad_num_blocks(n) for n in real_num_blocks
             ]
 
             # The mask's KV width is exactly the padded block extent: the tiles
