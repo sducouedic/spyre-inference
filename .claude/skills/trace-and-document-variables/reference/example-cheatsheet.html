@@ -1,0 +1,530 @@
+<title>Spyre Attention Cheat Sheet</title>
+<style>
+:root{
+  --bg:#f6f5f2; --surface:#ffffff; --surface-2:#edecf7; --border:#dcdae8;
+  --text:#1c1b22; --text-dim:#5b5968; --text-faint:#8b8898;
+  --mono-bg:#0d0d14; --mono-surface:#171622; --mono-border:#2c2a3d;
+  --head:#2f8f7d; --kv:#b8860f; --seq:#7457c9; --pad:#8b8898; --pad-bg:#e4e2ee;
+  --neg:#c94f4f; --neg-bg:#fbeaea; --zero:#2f8f7d; --zero-bg:#e9f5f1;
+  --tag-bucket:#7457c9; --tag-loop:#2f6f9e; --tag-mask:#b8860f;
+  --code-text:#e4e1f0; --code-dim:#8f8ba8;
+}
+:root:not([data-theme="light"]){ }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131219; --surface:#1a1826; --surface-2:#211f30; --border:#332f47;
+    --text:#eae8f2; --text-dim:#a8a4bd; --text-faint:#726d8a;
+    --mono-bg:#0a0910; --mono-surface:#171525; --mono-border:#332f47;
+    --head:#5fc7ae; --kv:#e0b23f; --seq:#a892e8; --pad:#726d8a; --pad-bg:#242138;
+    --neg:#e2837f; --neg-bg:#3a2226; --zero:#5fc7ae; --zero-bg:#1c2e2a;
+    --tag-bucket:#a892e8; --tag-loop:#6fa8d8; --tag-mask:#e0b23f;
+    --code-text:#e4e1f0; --code-dim:#8f8ba8;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131219; --surface:#1a1826; --surface-2:#211f30; --border:#332f47;
+  --text:#eae8f2; --text-dim:#a8a4bd; --text-faint:#726d8a;
+  --mono-bg:#0a0910; --mono-surface:#171525; --mono-border:#332f47;
+  --head:#5fc7ae; --kv:#e0b23f; --seq:#a892e8; --pad:#726d8a; --pad-bg:#242138;
+  --neg:#e2837f; --neg-bg:#3a2226; --zero:#5fc7ae; --zero-bg:#1c2e2a;
+  --tag-bucket:#a892e8; --tag-loop:#6fa8d8; --tag-mask:#e0b23f;
+  --code-text:#e4e1f0; --code-dim:#8f8ba8;
+}
+
+*{box-sizing:border-box;}
+html{color-scheme:light dark;}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:system-ui,-apple-system,sans-serif;
+  font-size:14px; line-height:1.5;
+}
+h1,h2,h3,h4{text-wrap:balance; margin:0;}
+code, .mono, .tensor, .val{
+  font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;
+}
+
+/* ---------- shell ---------- */
+.page{max-width:1180px; margin:0 auto; padding:28px 24px 80px;}
+
+.masthead{
+  display:flex; justify-content:space-between; align-items:baseline;
+  gap:16px; padding-bottom:16px; border-bottom:2px solid var(--text);
+  margin-bottom:22px; flex-wrap:wrap;
+}
+.masthead h1{font-size:22px; font-weight:800; letter-spacing:-0.01em;}
+.masthead .meta{font-size:12px; color:var(--text-faint); text-align:right;}
+.masthead .meta code{color:var(--text-dim);}
+
+/* ---------- legend strip ---------- */
+.legend{
+  display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+  padding:10px 14px; background:var(--surface); border:1px solid var(--border);
+  border-radius:8px; margin-bottom:22px; font-size:12px;
+}
+.legend .grp{display:flex; align-items:center; gap:6px;}
+.swatch{width:11px; height:11px; border-radius:3px; flex:none; display:inline-block;}
+.legend .sep{width:1px; height:14px; background:var(--border); margin:0 2px;}
+
+/* ---------- level 0 : global dims ---------- */
+.dims{
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  gap:1px; background:var(--border); border:1px solid var(--border);
+  border-radius:10px; overflow:hidden; margin-bottom:28px;
+}
+.dim{background:var(--surface); padding:10px 12px; position:relative;}
+.dim .k{font-size:10.5px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-faint); display:block; margin-bottom:3px;}
+.dim .v{font-size:19px; font-weight:700;}
+.dim.hd{border-top:3px solid var(--head);}
+.dim.kv{border-top:3px solid var(--kv);}
+.dim.sq{border-top:3px solid var(--seq);}
+.dim.cfg{border-top:3px solid var(--text-faint);}
+
+/* ---------- section chrome ---------- */
+section.scenario{margin-bottom:34px;}
+.scenario-head{
+  display:flex; align-items:baseline; gap:12px; margin-bottom:12px;
+  flex-wrap:wrap;
+}
+.scenario-head h2{font-size:16px; font-weight:800;}
+.scenario-head .tag{
+  font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;
+  padding:2px 8px; border-radius:20px; color:#fff;
+}
+.scenario-head .sub{font-size:12.5px; color:var(--text-dim);}
+
+details.fn{
+  background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  margin-bottom:10px; overflow:hidden;
+}
+details.fn > summary{
+  list-style:none; cursor:pointer; padding:11px 16px; display:flex;
+  align-items:baseline; gap:10px; font-weight:700; font-size:13.5px;
+  background:var(--surface-2);
+}
+details.fn > summary::-webkit-details-marker{display:none;}
+details.fn > summary::before{
+  content:"▸"; display:inline-block; color:var(--text-faint); transition:transform .15s;
+  width:10px;
+}
+details.fn[open] > summary::before{transform:rotate(90deg);}
+details.fn > summary .loc{font-weight:400; color:var(--text-faint); font-size:11.5px;}
+.fn-body{padding:14px 16px 16px;}
+
+/* ---------- variable rows ---------- */
+.vgrid{display:flex; flex-direction:column; gap:10px;}
+.vrow{
+  display:grid; grid-template-columns:210px 1fr; gap:12px; align-items:start;
+  padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg);
+}
+.vrow .name{
+  font-weight:700; font-size:13px; word-break:break-word;
+}
+.vrow .name .loc{display:block; font-weight:400; color:var(--text-faint); font-size:10.5px; margin-top:2px;}
+.vrow .sig{display:flex; flex-wrap:wrap; gap:5px; margin-top:6px;}
+.chip{
+  font-size:10.5px; padding:1px 7px; border-radius:5px; font-weight:600;
+  background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);
+}
+.chip.shape{color:var(--text);}
+.chip.dtype{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+
+.data{
+  background:var(--mono-bg); border:1px solid var(--mono-border); border-radius:7px;
+  padding:9px 11px; overflow-x:auto; color:var(--code-text);
+}
+.data .arr{white-space:pre; font-size:12px; line-height:1.55;}
+.data .note{font-size:10.5px; color:var(--code-dim); margin-top:5px; font-family:system-ui,sans-serif;}
+
+.n{color:var(--code-text);}
+.n.pad{color:var(--pad); background:var(--pad-bg); border-radius:3px; padding:0 2px;}
+.n.neg{color:var(--neg); background:var(--neg-bg); border-radius:3px; padding:0 2px;}
+.n.zero{color:var(--zero);}
+.n.hd{color:var(--head); font-weight:700;}
+.n.kv{color:var(--kv); font-weight:700;}
+.n.sq{color:var(--seq); font-weight:700;}
+
+.callout{
+  font-size:12px; color:var(--text-dim); background:var(--surface-2);
+  border-left:3px solid var(--text-faint); padding:8px 12px; border-radius:0 6px 6px 0;
+  margin:4px 0 14px;
+}
+.callout b{color:var(--text);}
+.callout ul{margin:0; padding-left:18px;}
+.callout li{margin:2px 0;}
+
+/* diagram-ish shape bars */
+.bar{display:flex; height:18px; border-radius:4px; overflow:hidden; margin-top:6px; border:1px solid var(--mono-border);}
+.bar span{display:block; height:100%;}
+.bar .real{background:var(--zero);}
+.bar .padseg{background:var(--pad-bg); background-image:repeating-linear-gradient(45deg,var(--pad) 0 3px,transparent 3px 6px); opacity:.55;}
+.bar-cap{font-size:10px; color:var(--code-dim); margin-top:3px; font-family:system-ui,sans-serif;}
+
+hr.div{border:none; border-top:1px dashed var(--border); margin:22px 0;}
+
+.tabs-bar{
+  display:flex; gap:4px; flex-wrap:wrap; margin-bottom:20px;
+  border-bottom:1px solid var(--border);
+}
+.tab-btn{
+  font-family:inherit; font-size:12px; font-weight:600; color:var(--text-dim);
+  background:none; border:none; border-bottom:2px solid transparent;
+  padding:8px 13px; margin-bottom:-1px; cursor:pointer; border-radius:6px 6px 0 0;
+}
+.tab-btn:hover{color:var(--text); background:var(--surface);}
+.tab-btn.active{color:var(--text); border-bottom-color:var(--seq); background:var(--surface);}
+.tab-btn:focus-visible{outline:2px solid var(--seq); outline-offset:-2px;}
+.tab-panel{display:none;}
+.tab-panel.active{display:block;}
+
+footer{margin-top:40px; font-size:11.5px; color:var(--text-faint); border-top:1px solid var(--border); padding-top:14px;}
+footer code{color:var(--text-dim);}
+
+a:focus-visible, summary:focus-visible{outline:2px solid var(--seq); outline-offset:2px;}
+
+@media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
+</style>
+
+<div class="page">
+
+  <div class="masthead">
+    <h1>spyre_attn.py — variable cheat sheet</h1>
+    <div class="meta">
+      captured from a real run · <code>torch_spyre_inference.py --max-num-batched-tokens 128 --max-num-seqs 8 --num-prompts 5</code><br>
+      <code>SPYRE_BUCKETED_DECODE=1</code> · model <code>micro-g3.3-8b-instruct-1b</code> · dtype <code>float16</code>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="grp"><span class="swatch" style="background:var(--head)"></span>query / head dim</div>
+    <div class="grp"><span class="swatch" style="background:var(--kv)"></span>KV / block dim</div>
+    <div class="grp"><span class="swatch" style="background:var(--seq)"></span>sequence / batch dim</div>
+    <div class="sep"></div>
+    <div class="grp"><span class="swatch" style="background:var(--zero)"></span>valid / 0.0</div>
+    <div class="grp"><span class="swatch" style="background:var(--pad)"></span>padding</div>
+    <div class="grp"><span class="swatch" style="background:var(--neg)"></span>−65504 (fp16 min, masked)</div>
+  </div>
+
+
+  <!-- ============ LEVEL 0 ============ -->
+  <h2 id="dims" style="font-size:14px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; color:var(--text-faint); margin-bottom:10px;">Level 0 — global / config dims (constant for the whole run)</h2>
+  <div class="dims">
+    <div class="dim hd"><span class="k">num_heads</span><span class="v" style="color:var(--head)">32</span></div>
+    <div class="dim hd"><span class="k">head_size</span><span class="v" style="color:var(--head)">128</span></div>
+    <div class="dim kv"><span class="k">num_kv_heads</span><span class="v" style="color:var(--kv)">8</span></div>
+    <div class="dim kv"><span class="k">block_size</span><span class="v" style="color:var(--kv)">128</span></div>
+    <div class="dim hd"><span class="k">num_queries_per_kv</span><span class="v" style="color:var(--head)">4</span></div>
+    <div class="dim cfg"><span class="k">sliding_window</span><span class="v">None</span></div>
+    <div class="dim cfg"><span class="k">KV_LENGTH_ALIGNMENT</span><span class="v">256</span></div>
+    <div class="dim cfg"><span class="k">QUERY_CHUNK_SIZE</span><span class="v">32</span></div>
+    <div class="dim cfg"><span class="k">INT32_ELEMS_PER_STICK</span><span class="v">32</span></div>
+    <div class="dim cfg"><span class="k">_MIN_SEQS_BUCKET</span><span class="v">4</span></div>
+    <div class="dim cfg"><span class="k">mask fill (masked)</span><span class="v" style="color:var(--neg); font-size:15px;">−65504.0</span></div>
+    <div class="dim cfg"><span class="k">mask fill (valid)</span><span class="v" style="color:var(--zero); font-size:15px;">0.0</span></div>
+  </div>
+  <div class="callout">
+    <ul>
+      <li><b>num_queries_per_kv = 32/8 = 4</b> — GQA group size: 4 query heads per KV head.</li>
+      <li><b>−65504.0 = torch.finfo(float16).min</b> — additive mask fill, in place of −inf.</li>
+      <li><b>_num_seqs_buckets = (1,2,4,8)</b>, <b>_num_blocks_buckets = (1,2,4,8,16)</b> — powers of 2 up to the cap.</li>
+    </ul>
+  </div>
+
+  <div class="tabs-bar">
+    <button class="tab-btn active" onclick="switchTab('s1', this)">1 · full prefill</button>
+    <button class="tab-btn" onclick="switchTab('s2', this)">2 · mixed prefill+decode</button>
+    <button class="tab-btn" onclick="switchTab('s3', this)">3 · bucketed decode</button>
+  </div>
+
+  <!-- ============ SCENARIO 1 ============ -->
+  <section class="scenario tab-panel active" id="tab-s1">
+    <div class="scenario-head">
+      <h2>Scenario 1 — single sequence, full prefill</h2>
+      <span class="tag" style="background:var(--tag-loop)">per-seq loop</span>
+      <span class="sub">warmup step 1 · num_reqs=1 · query_len = kv_len = 8 (no cache yet)</span>
+    </div>
+
+    <details class="fn" open>
+      <summary>build() <span class="loc">— AttentionMetadataBuilder.build(), entry + alignment</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+
+          <div class="vrow">
+            <div class="name">query_start_loc<span class="loc">Tensor · cumulative query-row offsets</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_reqs+1,) = (2,)</span><span class="chip dtype">int32</span><span class="chip">cpu</span></div>
+              <div class="data"><div class="arr">[<span class="n">0</span>, <span class="n sq">8</span>]</div><div class="note">seq 0 owns query rows [0, 8)</div></div>
+            </div>
+          </div>
+
+          <div class="vrow">
+            <div class="name">block_table<span class="loc">Tensor · logical block → physical page</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_reqs, max_blocks) = (1, 16)</span><span class="chip dtype">int32</span><span class="chip">cpu</span></div>
+              <div class="data"><div class="arr">[<span class="n kv">1</span>, <span class="n pad">0 × 15</span>]</div><div class="note">1 real page; the other 15 slots are unused capacity, never written</div></div>
+            </div>
+          </div>
+
+          <div class="vrow">
+            <div class="name">slot_mapping<span class="loc">Tensor · flat token → physical KV slot</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_tokens,) = (8,)</span><span class="chip dtype">int64</span><span class="chip">cpu</span></div>
+              <div class="data"><div class="arr">[128, 129, 130, 131, 132, 133, 134, 135]</div><div class="note">page 1 (page 0 reserved), slots 0..7 of block_size=128</div></div>
+            </div>
+          </div>
+
+          <hr class="div">
+
+          <div class="vrow">
+            <div class="name">aligned_max_query_len<span class="loc">int · ceil(8/QUERY_CHUNK_SIZE) × 32</span></div>
+            <div><div class="data"><div class="arr"><span class="n sq">8</span> → <span class="n sq">32</span></div></div></div>
+          </div>
+
+          <div class="vrow">
+            <div class="name">aligned_max_seq_len<span class="loc">int · ceil(8/KV_LENGTH_ALIGNMENT) × 256</span></div>
+            <div><div class="data"><div class="arr"><span class="n kv">8</span> → <span class="n kv">256</span></div><div class="note">one KV tier</div></div></div>
+          </div>
+
+          <div class="vrow">
+            <div class="name">apply_causal_mask<span class="loc">bool · flag, selects the mask branch</span></div>
+            <div><div class="data"><div class="arr">True</div><div class="note">max_query_len(8) &gt; 1 → a prefill is present</div></div></div>
+          </div>
+
+        </div>
+      </div>
+    </details>
+
+    <details class="fn" open>
+      <summary>build() → _build_attention_mask() <span class="loc">— line ~575</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">mask_cpu<span class="loc">Tensor · additive mask, (query, kv) per seq</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_reqs, aligned_q, aligned_kv) = (1, 32, 256)</span><span class="chip dtype">float16</span></div>
+              <div class="data">
+                <div class="arr">row 0:  [<span class="n zero">0.0</span>, <span class="n neg">-65504.0</span> × 255]</div>
+                <div class="arr">row 7:  [<span class="n zero">0.0</span> × 8, <span class="n neg">-65504.0</span> × 248]</div>
+                <div class="arr">row 8..31: all <span class="n neg">-65504.0</span>  <span class="note" style="display:inline">query padding</span></div>
+                <div class="bar"><span class="real" style="width:12.5%"></span><span class="padseg" style="width:87.5%"></span></div>
+                <div class="bar-cap">8/256 valid kv · causal frontier grows one col per row</div>
+              </div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div class="name">attention_mask_tiles<span class="loc">list[list[Tensor]] · [seq][KV tier] slices of mask_cpu</span></div>
+            <div>
+              <div class="sig"><span class="chip">len 1, inner lens [1]</span></div>
+              <div class="data"><div class="arr">tiles[0][0]: <span class="chip shape">(32, 256)</span> <span class="chip dtype">float16</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="fn" open>
+      <summary>_build_query_row_tables() <span class="loc">— line 183</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">rows<span class="loc">Tensor · padded query slot → real query row</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_seqs, aligned_q) = (1, 32)</span><span class="chip dtype">int32</span></div>
+              <div class="data"><div class="arr">[<span class="n">0, 1, 2, 3, 4, 5, 6, 7</span>, <span class="n pad">7 × 24</span>]</div><div class="note"><b>padding clamps to the last valid row (7), not 0</b> — compute-then-discard</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="fn" open>
+      <summary>forward() <span class="loc">— SpyreAttentionImpl.forward(), entry, line ~1172</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">query / key / value<span class="loc">Tensor · dim0 = flat tokens, dim1 = heads (GQA: 32 q vs 8 kv), dim2 = head_size</span></div>
+            <div>
+              <div class="data"><div class="arr">query:     (<span class="n sq">8</span>, <span class="n hd">32</span>, <span class="n hd">128</span>)  <span class="chip dtype">float16</span>
+key/value: (<span class="n sq">8</span>, <span class="n kv">8</span>, <span class="n hd">128</span>)  <span class="chip dtype">float16</span></div></div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div class="name">k_pages / v_pages<span class="loc">SpyrePagedKVCache · [num_blocks, block_size, num_kv_heads, head_size]</span></div>
+            <div><div class="data"><div class="arr">(129, <span class="n kv">128</span>, <span class="n kv">8</span>, <span class="n hd">128</span>) <span class="chip dtype">float16</span></div><div class="note">block 0 reserved</div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">store_mode<span class="loc">str · how outputs are written back</span></div>
+            <div><div class="data"><div class="arr">'copy'</div><div class="note">single full-length seq → contiguous write; any multi-seq batch uses 'index'</div></div></div>
+          </div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ SCENARIO 2 ============ -->
+  <section class="scenario tab-panel" id="tab-s2">
+    <div class="scenario-head">
+      <h2>Scenario 2 — ragged batch: 3 decode + 1 mid-prefill + 1 full-prefill</h2>
+      <span class="tag" style="background:var(--tag-loop)">per-seq loop</span>
+      <span class="sub">step 3 · num_reqs=5 · query_len differs per seq (1,1,1,50,75) — same variables as tab 1, now heterogeneous</span>
+    </div>
+
+    <details class="fn" open>
+      <summary>build() <span class="loc">— entry + alignment</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">seq_lens<span class="loc">Tensor · total kv length so far, per seq</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_reqs,) = (5,)</span><span class="chip dtype">int32</span></div>
+              <div class="data"><div class="arr">[<span class="n kv">10</span>, <span class="n kv">49</span>, <span class="n kv">55</span>, <span class="n kv">75</span>, <span class="n kv">75</span>]</div></div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div class="name">query_start_loc<span class="loc">Tensor · ragged: unequal gaps encode per-seq query_len</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(6,)</span><span class="chip dtype">int32</span></div>
+              <div class="data"><div class="arr">[<span class="n">0</span>, <span class="n sq">1</span>, <span class="n sq">2</span>, <span class="n sq">3</span>, <span class="n sq">53</span>, <span class="n sq">128</span>]</div><div class="note">seq0-2: len 1 (decode) · seq3: len 50 (mid-prefill) · seq4: len 75 (full prefill)</div></div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div class="name">aligned_max_query_len / aligned_max_seq_len<span class="loc">int · driven by the longest seq, applied to all</span></div>
+            <div><div class="data"><div class="arr">query: <span class="n sq">75</span> → <span class="n sq">96</span>   kv: <span class="n kv">75</span> → <span class="n kv">256</span></div><div class="note">the 3 decode seqs pay the 96-row width too — this is the cost bucketing (tab 3) avoids</div></div></div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="fn" open>
+      <summary>_build_query_row_tables() <span class="loc">— line 183 · one row per seq, each clamp-padded to 96</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">rows<span class="loc">Tensor · real rows then clamp to each seq's last</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_seqs, aligned_q) = (5, 96)</span><span class="chip dtype">int32</span></div>
+              <div class="data">
+                <div class="arr">seq0: [<span class="n">0</span>, <span class="n pad">0 × 95</span>]         <span class="note" style="display:inline">1 real row</span></div>
+                <div class="arr">seq3: [<span class="n">3 … 52</span>, <span class="n pad">52 × 46</span>]    <span class="note" style="display:inline">50 real rows</span></div>
+                <div class="arr">seq4: [<span class="n">53 … 127</span>, <span class="n pad">127 × 21</span>]  <span class="note" style="display:inline">75 real rows</span></div>
+                <div class="bar"><span class="real" style="width:78%"></span><span class="padseg" style="width:22%"></span></div>
+                <div class="bar-cap">seq4 is nearly full (75/96); seq0 is 1/96 real — padding waste scales with raggedness</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="fn" open>
+      <summary>_online_softmax_attention() → per-seq loop <span class="loc">— line ~1370 · 5 iterations, 2 shown</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">seq_idx=0<span class="loc">decode</span></div>
+            <div><div class="data"><div class="arr">q_start=<span class="n sq">0</span> q_end=<span class="n sq">1</span> query_len=<span class="n sq">1</span> kv_len=<span class="n kv">10</span>  page_index_table=[<span class="n kv">1</span>, <span class="n pad">0 × 31</span>]</div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">seq_idx=3<span class="loc">mid-prefill: 50 new tokens on a 25-token cache</span></div>
+            <div><div class="data"><div class="arr">q_start=<span class="n sq">3</span> q_end=<span class="n sq">53</span> query_len=<span class="n sq">50</span> kv_len=<span class="n kv">75</span>  page_index_table=[<span class="n kv">4</span>, <span class="n pad">0 × 31</span>]</div><div class="note">query_len &lt; kv_len is the mid-prefill signature · page_index_table rows are padded to INT32_ELEMS_PER_STICK=32</div></div></div>
+          </div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ SCENARIO 3 ============ -->
+  <section class="scenario tab-panel" id="tab-s3">
+    <div class="scenario-head">
+      <h2>Scenario 3 — pure decode, 5 sequences bucketed to 8</h2>
+      <span class="tag" style="background:var(--tag-bucket)">bucketed decode dispatch</span>
+      <span class="sub">SPYRE_BUCKETED_DECODE=1 · num_seqs=5 ≥ _MIN_SEQS_BUCKET(4) · max_query_len=1 · no sliding window</span>
+    </div>
+
+    <div class="callout">Instead of looping per seq, the batch is padded up to a power-of-2 bucket and run as one fused 4D matmul — so every shape below carries <b>b_seqs=8</b>, not 5, and the 3 padding rows are sliced off only at the very end.</div>
+
+    <details class="fn" open>
+      <summary>build() — bucket selection + padded index tensors <span class="loc">spyre_attn.py:911-912</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">b_seqs / b_blocks<span class="loc">int · smallest bucket ≥ actual, from (1,2,4,8) / (1,2,4,8,16)</span></div>
+            <div><div class="data"><div class="arr">num_seqs <span class="n sq">5</span> → b_seqs <b style="color:var(--seq)">8</b>   max_num_active <span class="n kv">1</span> → b_blocks <span class="n kv">1</span></div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">query_row_ids_cpu<span class="loc">Tensor · which flat query row each bucket slot reads</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(b_seqs,) = (8,)</span><span class="chip dtype">int64</span><span class="chip">cpu</span></div>
+              <div class="data">
+                <div class="arr">[<span class="n sq">0, 1, 2, 3, 4</span>, <span class="n pad">0, 0, 0</span>]</div>
+                <div class="bar"><span class="real" style="width:62.5%"></span><span class="padseg" style="width:37.5%"></span></div>
+                <div class="bar-cap">5 real seq rows · 3 bucket-padding rows re-reading row 0</div>
+                <div class="note"><b>int64 required</b> — Spyre's <code>index_copy_</code> rejects int32 indices</div>
+              </div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div class="name">block_ids_padded_cpu<span class="loc">Tensor · physical page id per bucket slot</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(b_seqs * b_blocks,) = (8,)</span><span class="chip dtype">int32</span><span class="chip">cpu</span></div>
+              <div class="data"><div class="arr">[<span class="n kv">1, 2, 3, 4, 5</span>, <span class="n pad">0, 0, 0</span>]</div><div class="note">kept flat, not <code>.reshape(b_seqs, b_blocks)</code> — inductor's stick-width constraint rejects the 2D form</div></div>
+            </div>
+          </div>
+          <div class="vrow">
+            <div class="name">mask_by_block_cpu<span class="loc">Tensor · [b_blocks, b_seqs·KV, 1, 1, block_size], per KV head not shared</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(1, 64, 1, 1, 128)</span><span class="chip dtype">float16</span></div>
+              <div class="data"><div class="arr">64 = b_seqs(<span class="n sq">8</span>) × num_kv_heads(<span class="n kv">8</span>)
+seq0 head0: [<span class="n zero">0.0</span> × 10, <span class="n neg">-65504.0</span> × 118]</div><div class="note">valid prefix = that seq's kv_len; the 3 padding seqs are fully <span class="n neg">-65504.0</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="fn" open>
+      <summary>_run_bucketed_decode_dispatch() <span class="loc">— line 1280 · gather → pack → fused matmul → slice back</span></summary>
+      <div class="fn-body">
+        <div class="vgrid">
+          <div class="vrow">
+            <div class="name">k_gath<span class="loc">Tensor · KV pages gathered by block_ids_padded — [b_seqs, block_size, kv_heads, head_size]</span></div>
+            <div><div class="data"><div class="arr">(<span class="n sq">8</span>, <span class="n kv">128</span>, <span class="n kv">8</span>, <span class="n hd">128</span>)</div><div class="note"><code>index_select</code>, not subscript — subscripting upcasts int32→int64 and fails eager on Spyre</div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">k_list_dev_0<span class="loc">Tensor · one block's KV, kv_heads folded into the batch dim</span></div>
+            <div><div class="data"><div class="arr">(<span class="n">64</span>, <span class="n kv">1</span>, <span class="n kv">128</span>, <span class="n hd">128</span>)</div><div class="note">64 = b_seqs × num_kv_heads</div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">q_packed<span class="loc">Tensor · queries per (seq×kv_head, q_per_kv) — GQA grouping made explicit</span></div>
+            <div><div class="data"><div class="arr">(<span class="n">64</span>, <span class="n hd">4</span>, <span class="n kv">1</span>, <span class="n hd">128</span>)</div><div class="note">4 = num_queries_per_kv; rows 5..7 duplicate seq 0's query</div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">result<span class="loc">Tensor · kernel output, still bucket-shaped</span></div>
+            <div><div class="data"><div class="arr">(<span class="n">64</span>, <span class="n hd">4</span>, <span class="n hd">128</span>) → (<span class="n sq">8</span>, <span class="n hd">32</span>, <span class="n hd">128</span>)</div><div class="note">regrouped to [bucket_seq, head, head_size] — still includes the 3 padding rows</div></div></div>
+          </div>
+          <div class="vrow">
+            <div class="name">output<span class="loc">Tensor · final, real tokens only</span></div>
+            <div>
+              <div class="sig"><span class="chip shape">(num_seqs, num_heads, head_size) = (5, 32, 128)</span><span class="chip dtype">float16</span></div>
+              <div class="data"><div class="arr">(<span class="n sq">8</span>, …) → (<span class="n sq">5</span>, <span class="n hd">32</span>, <span class="n hd">128</span>)</div><div class="note">bucket rows 5-7 dropped here — never written to the KV cache or returned</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <footer>
+    Data captured via temporary <code>_dbg()</code> print instrumentation in <code>spyre_attn.py</code> (removed after capture — file is unmodified) during a real run of <code>examples/offline_inference/torch_spyre_inference.py</code> with the exact args/env from the "Spyre Inference" launch config. Line numbers refer to the current, uninstrumented source file.
+  </footer>
+
+</div>
+
+<script>
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+}
+</script>

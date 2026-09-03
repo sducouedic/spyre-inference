@@ -11,7 +11,7 @@ Build a hierarchical, color-coded HTML reference for the concrete structure, typ
 
 **Everything in the cheat sheet must come from a real, instrumented run.** Never invent example shapes, keys or values, even plausible-looking ones — this is the one rule that can't be relaxed. If you can't run the code (no hardware, no fixture, missing input), say so and stop; do not fill the gap with a guess.
 
-**Terseness is a hard requirement.** This is a notation reference, not documentation. A variable is described by its structure (shape/dtype/device, keys, length, fields) and a value preview — nothing else. Where words are unavoidable, spend at most **a few** on the inputs, the few local variables that actually carry the logic, and the final output. No sentences explaining what a reshape does or what a dict is keyed by; the before/after structures already say it. See "Word budget" below — violating it is the most common way this skill produces something the user won't re-open.
+**Terseness is a hard requirement, but not silence.** This is a notation reference, not documentation. A variable is described by its structure (shape/dtype/device, keys, length, fields), a value preview, and — where it helps — a **few-word reminder** of what it holds, what a shape dimension counts, or what the non-padded prefix of a padded tensor represents. Assume the reader already knows the code: you are jogging their memory, not teaching them. "flat token → physical KV slot", "dim1 = kv heads (GQA)", "5 real seqs, rest bucket padding" is the right size; a sentence explaining *why* a reshape happens is not. See "Word budget" below — over-explaining is the most common way this skill produces something the user won't re-open.
 
 ## Two kinds of variables
 
@@ -134,12 +134,19 @@ Keep the logs — they're the source data for step 6. Never ship a cheat sheet w
 
 Write one self-contained HTML file to `.claude/skills/trace-and-document-variables/logs/<slug>.html` and give the user the path. Self-contained means no external CSS/JS/font requests: inline everything so the file opens straight from disk. This is a **utilitarian/reference treatment**, not editorial — the user re-opens it repeatedly mid-debugging, so density and scannability outrank flourish.
 
+**Start from the worked example.** `reference/example-cheatsheet.html` next to this file is a complete, correct sheet — treat it as the template and adapt it, rather than designing a new one. Carry over:
+
+- Its **color palette** — the `:root` token block, with the light/dark/`[data-theme]` triple already in place.
+- Its **row anatomy** — `.vrow` → `.name` + inline `<span class="loc">` gloss / `.sig` structure chips / `.data` monospace preview, with per-element `.n.pad` / `.n.neg` / `.n.hd` / `.n.kv` / `.n.sq` coloring.
+- Its **chrome** — `.legend` strip, `.dims` base-config grid, real-vs-padding `.bar`, `<details class="fn">` per function, `.tabs-bar` + `.tab-panel` with the `switchTab` script.
+- Its **gloss density** — the `loc` after each variable name, the one-line `.note` under a preview, the scenario `.sub` line, and the bulleted `.callout` are exactly the word budget described above, in situ.
+
 Structure:
 
 1. **Masthead** — scope covered, the exact command/config used, model/dtype.
 2. **Legend** — the color key, once, small.
-3. **Base config strip** — a compact grid of the fixed values from step 2. One glance re-anchors the mental model. Values only, no prose.
-4. **One tab per scenario/code path** (see below), each holding one collapsible `<details>` per function, each holding a `<div class="vrow">` per variable. Every row leads with its **structure chips**, then a value preview. Which chips depends on the kind — one row layout, kind-appropriate chips:
+3. **Base config strip** — a compact grid of the fixed values from step 2. One glance re-anchors the mental model. Values only; a derived one may carry a few words (`num_queries_per_kv = 32/8 — GQA group size`).
+4. **One tab per scenario/code path** (see below) — each tab headed by its few-word description and run facts — each holding one collapsible `<details>` per function, each holding a `<div class="vrow">` per variable. Every row is **name + few-word gloss**, then structure chips, then a value preview. Which chips depends on the kind — one row layout, kind-appropriate chips:
    - tensor: shape → dtype → device → value preview
    - dict: `len` → key list (keys as chips), one indented sub-row per interesting value
    - list/tuple: `len` → element kind → preview (mark ragged lengths explicitly)
@@ -148,38 +155,29 @@ Structure:
    Nest sub-rows at most two levels deep; below that, summarize.
 5. **Footer** — one line: env-gated prints, since reverted; line numbers refer to the clean file.
 
-**Scenarios go in tabs, not stacked sections.** One tab bar across the top, one panel per scenario, first panel active on load — so switching between prefill and decode is a click rather than a scroll, and the same variable sits in the same screen position across paths. The markup and script, which have to agree on the `tab-<name>` ids:
-
-```html
-<div class="tabs-bar">
-  <button class="tab-btn active" onclick="switchTab('prefill', this)">Prefill</button>
-  <button class="tab-btn"        onclick="switchTab('decode', this)">Decode</button>
-</div>
-<div id="tab-prefill" class="tab-panel active">…</div>
-<div id="tab-decode"  class="tab-panel">…</div>
-<script>
-function switchTab(name, btn) {
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  btn.classList.add('active');
-}
-</script>
-```
-
-Style it however suits the sheet, with one catch: give every `.tab-btn` a transparent `border-bottom` of the same width as the active one, so the row doesn't shift when the underline appears.
+**Scenarios go in tabs, not stacked sections** — one tab bar, one panel per scenario, first active on load, so switching between prefill and decode is a click rather than a scroll and the same variable sits in the same screen position across paths. Copy the `.tabs-bar` / `.tab-panel` CSS, the `<button onclick="switchTab('<name>', this)">` markup and the `switchTab` function from the example; the button names and the `tab-<name>` panel ids have to agree. The base-config strip stays **above** the bar, since it holds for every scenario.
 
 #### Word budget
 
-- Variable rows: **no prose at all** by default — `name` / structure chips / value preview.
-- A `<div class="note">` is allowed only for a fact the shape and values cannot convey, and is capped at **one short line** (e.g. "padding clamps to last valid row, not zero", "key absent on the decode path"). Never a restatement of the structure.
-- Per function: at most a handful of words naming what comes in and what goes out. No description of the steps between.
-- If you're writing a second sentence anywhere, delete it.
+- **Variable rows**: an inline gloss of **a few words** next to the name — what the variable holds, in the reader's own vocabulary (`slot_mapping · flat token → physical KV slot`). Not a definition, a label.
+- **Shape dimensions**: name what a dimension counts when it isn't obvious from the chip (`dim0 = flat tokens across batch`, `64 = b_seqs × num_kv_heads`). Do this once per novel shape, not on every row that repeats it.
+- **Padded / bucketed tensors**: say what the real prefix is and what the padding is (`5 real decode rows, 3 bucket-padding rows`). This is the single most valuable gloss in the sheet — never skip it.
+- A `<div class="note">` is for a fact the structure and values cannot convey, capped at **one short line** (e.g. "padding clamps to last valid row, not zero", "key absent on the decode path"). Never a restatement of the structure.
+- **Per function**: a few words naming what comes in and what goes out. No description of the steps between.
+- Everywhere: **one line, no second sentence.** If a gloss needs a second sentence to land, it's explaining rather than reminding — cut it.
+
+#### Scenario descriptions
+
+Every scenario/tab carries a **tiny high-level description** of what the case *is*, next to its title — the thing that stops the user having to reverse-engineer the setup from the shapes each time they open the tab:
+
+- Shape: a handful of words. `single sequence, full prefill` · `per-seq loop, ragged batch` · `4D full-batch decode matmul` · `3 decode + 1 mid-prefill + 1 full-prefill`.
+- Plus a one-line sub-label with the concrete run facts: step number, `num_reqs`, per-seq query/kv lengths, the env var that selected the path.
+- If the scenario is genuinely complex (an unusual dispatch, a non-obvious precondition, a bucket lattice that has to be known to read the numbers), a slightly longer note is fine — a sentence or two of context, once, at the top of the tab. Complexity earns words; a straightforward prefill does not.
 
 #### Design conventions
 
 - **Color coding is semantic and consistent document-wide**: one color per *concept* (head/query dims, KV/block dims, sequence/batch dims), reused everywhere that concept appears — in shape chips, dict keys, field names and inline numbers alike, so a dict keyed by layer and a tensor sized by layer read as the same concept. Padding gets its own neutral grey, used for every padded value in every tab, so "that's padding" reads on sight. A masked/sentinel value (e.g. fp16 min in an additive mask) gets its own fixed color.
-- **Notation over prose**: each variable as `name` / structure chips / monospace value preview with per-element coloring. Tensors get the densest treatment (shape/dtype/device + colored elements) because they are the hardest to read; containers get keys/lengths as chips with nested rows for the values that matter.
+- **Notation over prose, glossed**: each variable as `name` + few-word gloss / structure chips / monospace value preview with per-element coloring. The gloss rides inline with the name (the example's `<span class="loc">`), so it reads as part of the notation rather than a paragraph beside it. Tensors get the densest treatment (shape/dtype/device + colored elements) because they are the hardest to read; containers get keys/lengths as chips with nested rows for the values that matter.
 - **Real vs. padding ratio bars**: for bucketed/padded tensors, a tiny two-segment bar (solid = real, hatched = padding) next to the preview makes the ratio legible without counting.
 - **Collapsible `<details>` per function**, all open.
 - **Theme-aware**: light tokens on bare `:root`, redefined under `@media (prefers-color-scheme: dark)` guarded by `:root:not([data-theme="light"])`, and again under `:root[data-theme="dark"]`. Never define a color only inside a media/attribute block.
@@ -187,7 +185,9 @@ Style it however suits the sheet, with one catch: give every `.tab-btn` a transp
 
 ## What NOT to do
 
-- Don't write prose. Structures and values are the content; a paragraph explaining a reshape or a dict's layout is noise the user has to skip past every time they open the sheet.
+- Don't write prose. Structures and values are the content, glossed with a few words each; a paragraph explaining a reshape or a dict's layout is noise the user has to skip past every time they open the sheet.
+- Don't strip the sheet down to bare notation either — an unlabelled `(64, 4, 1, 128)` costs the user the same re-derivation the sheet exists to prevent. Gloss it.
+- Don't leave a scenario tab unlabelled — every tab says in a few words what the case is (see "Scenario descriptions").
 - Don't invent or extrapolate structures or values "because they're plausible" — every number traces back to a captured `### DBG[...]` block.
 - Don't pick base configs yourself — harvest them from the user's own end-to-end run (step 2).
 - Don't pre-flight hardware/imports/device setup before the first run — trust the user's scenario and run it. If it fails, report the failure and stop; don't debug the environment.
@@ -197,4 +197,6 @@ Style it however suits the sheet, with one catch: give every `.tab-btn` a transp
 - Don't dump a container in full. Keys/fields/length plus a bounded per-value summary, two levels deep at most.
 - Don't leave debug prints in the source file after capture — always revert (step 5).
 - Don't stack scenarios as long scrolling sections — use the tab bar.
+- Don't paste multi-fact callouts as one paragraph — one `<li>` per fact.
+- Don't link web fonts; the file must render identically opened offline from disk.
 - Don't skip an *easily* reachable branch to save time — the bucketed-vs-per-seq (or equivalent) distinction is usually the point of the sheet. But don't sink time into one that resists either: report it as unreached and ship the rest.
