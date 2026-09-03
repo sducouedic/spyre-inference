@@ -21,7 +21,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from spyre_inference import envs
-from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_to
+from spyre_inference.v1.attention.backends.spyre_attn import (
+    _powers_of_two_up_to,
+    resolve_needs_gather,
+    resolve_store_mode,
+)
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucket,
     SpyreAttnBucketer,
@@ -135,44 +139,6 @@ class TestFindBucket:
         assert bucketer.find_query_bucket(513) is None
 
 
-class TestDispatch:
-    def test_num_blocks_derived_from_kv_tier(self, bucketer):
-        b = bucketer.dispatch(kv_len=300, query_len=8)
-        assert b is not None
-        # 300 rounds to the 512 bucket, which is 8 blocks of 64.
-        assert b.num_blocks == 512 // BLOCK_SIZE
-        assert b.padded_query_len == 512
-
-    def test_decode_dispatch_keeps_query_len_one(self, bucketer):
-        b = bucketer.dispatch(kv_len=1000, query_len=1)
-        assert b is not None
-        assert b.padded_query_len == 1
-
-    def test_over_max_on_either_axis_raises(self, bucketer):
-        """Both axes are built to cover their limit, so an over-max length is a
-        contract violation by the caller, not a bucket set to fall back from."""
-        with pytest.raises(AssertionError, match="no attention bucket"):
-            bucketer.dispatch(kv_len=99999, query_len=32)
-        with pytest.raises(AssertionError, match="no attention bucket"):
-            bucketer.dispatch(kv_len=256, query_len=99999)
-
-    def test_descriptor_is_frozen(self, bucketer):
-        b = bucketer.dispatch(kv_len=256, query_len=1)
-        assert b is not None
-        with pytest.raises(FrozenInstanceError):
-            b.num_blocks = 10
-
-    @pytest.mark.parametrize("kv_len", [1, 64, 255, 256, 257, 1024, 2048])
-    @pytest.mark.parametrize("query_len", [1, 2, 31, 32, 33, 200, 512])
-    def test_dispatch_always_lands_on_a_recorded_variant(self, bucketer, kv_len, query_len):
-        """The whole point of recording: no runtime batch may miss the cache."""
-        if query_len > kv_len:
-            pytest.skip("a sequence cannot have more new tokens than total KV")
-        b = bucketer.dispatch(kv_len, query_len)
-        assert b is not None
-        assert b.key in {v.key for v in bucketer.variants()}
-
-
 class TestVariants:
     def test_no_duplicates(self, bucketer):
         variants = bucketer.variants()
@@ -187,10 +153,53 @@ class TestVariants:
 
     def test_prunes_unreachable_flag_combinations(self, bucketer):
         keys = {(v.store_mode, v.needs_gather) for v in bucketer.variants()}
-        # "copy" implies the sequence owns every output row, which implies no gather.
+        # "copy" is the one-row batch, whose lone sequence necessarily owns row 0.
         assert ("copy", True) not in keys
-        # "index" is only needed when the destination is a strict superset of rows.
-        assert ("index", False) not in keys
+
+    def test_descriptor_is_frozen(self, bucketer):
+        with pytest.raises(FrozenInstanceError):
+            bucketer.variants()[0].num_blocks = 10
+
+    def test_copy_only_at_the_decode_bucket(self, bucketer):
+        """A "copy" store needs output.shape[0] == 1, i.e. the whole batch is one
+        token, which forces max_query_len == 1 and so the unpadded decode bucket."""
+        for v in bucketer.variants():
+            if v.store_mode == "copy":
+                assert v.padded_query_len == 1
+
+    def test_index_without_gather_is_recorded_above_the_decode_bucket(self, bucketer):
+        """A single-sequence prefill filling the query buffer exactly needs no
+        gather, yet stores by index because the batch is wider than one row.
+        Reachable, so it must not pay an Inductor compile in the serving path."""
+        for bucket in bucketer.query_buckets:
+            if bucket == 1:
+                continue
+            keys = {
+                (v.store_mode, v.needs_gather)
+                for v in bucketer.variants()
+                if v.padded_query_len == bucket
+            }
+            assert ("index", False) in keys
+
+    @pytest.mark.parametrize("output_rows", [1, 2, 8, 512])
+    @pytest.mark.parametrize("fused_store_ok", [True, False])
+    def test_every_resolved_runtime_pair_was_recorded(self, bucketer, output_rows, fused_store_ok):
+        """The anti-drift guard: the flags come from the backend's own resolvers,
+        so this fails if either the resolvers or the enumeration changes alone."""
+        recorded = {(v.store_mode, v.needs_gather) for v in bucketer.variants()}
+        for query_len in (1, 2, 5, 200, 512):
+            padded = bucketer.find_query_bucket(query_len)
+            assert padded is not None
+            if output_rows == 1 and padded != 1:
+                continue  # a one-row batch cannot hold a longer query
+            for q_start in (0, 1):
+                if q_start >= output_rows:
+                    continue
+                pair = (
+                    resolve_store_mode(fused_store_ok, output_rows),
+                    resolve_needs_gather(q_start, padded, padded, output_rows),
+                )
+                assert pair in recorded, f"unrecorded runtime pair {pair}"
 
     def test_prunes_query_buckets_no_real_query_len_can_reach(self, bucketer):
         """Pruning bounds the *smallest real* query_len that reaches a bucket, not
@@ -201,6 +210,24 @@ class TestVariants:
         min_real = {b: (ascending[i - 1] + 1 if i else 1) for i, b in enumerate(ascending)}
         for v in bucketer.variants():
             assert min_real[v.padded_query_len] <= v.num_blocks * BLOCK_SIZE
+
+    @pytest.mark.parametrize("kv_len", [1, 64, 255, 256, 257, 1024, 2048])
+    @pytest.mark.parametrize("query_len", [1, 2, 31, 32, 33, 200, 512])
+    def test_every_rounded_size_lands_on_a_recorded_variant(self, bucketer, kv_len, query_len):
+        """The whole point of recording: no runtime batch may miss the cache.
+
+        Drives the two lookups production actually uses -- find_query_bucket for
+        the query axis, and _round_up onto num_blocks_buckets for the block count
+        (what the builder's _pad_num_blocks calls)."""
+        if query_len > kv_len:
+            pytest.skip("a sequence cannot have more new tokens than total KV")
+        padded_query_len = bucketer.find_query_bucket(query_len)
+        num_blocks = bucketer._round_up(
+            (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE, bucketer.num_blocks_buckets
+        )
+        assert padded_query_len is not None and num_blocks is not None
+        sizes = {(v.num_blocks, v.padded_query_len) for v in bucketer.variants()}
+        assert (num_blocks, padded_query_len) in sizes
 
     def test_count_stays_tractable_at_long_context(self):
         """Dense buckets here would be tens of thousands of Inductor compiles."""
@@ -244,7 +271,7 @@ class TestEnvOverride:
         b = SpyreAttnBucketer(make_config(max_model_len=2048))
         assert b.kv_buckets == [128, 8192]
 
-    def test_dispatch_covers_every_in_contract_length_under_a_short_override(self, monkeypatch):
+    def test_covers_every_in_contract_length_under_a_short_override(self, monkeypatch):
         """The point of the top-up: no in-contract batch falls off either axis."""
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128")
         monkeypatch.setenv("SPYRE_ATTN_QUERY_BUCKETS", "1")
@@ -255,13 +282,13 @@ class TestEnvOverride:
             for query_len in (1, 2, 200, max_batched):
                 if query_len > kv_len:
                     continue
-                assert b.dispatch(kv_len, query_len) is not None
+                assert b.find_kv_bucket(kv_len) is not None
+                assert b.find_query_bucket(query_len) is not None
 
-    def test_dispatch_rejects_a_length_outside_the_contract(self, monkeypatch):
-        """Past max_model_len there is no bucket by design -- and no silent None."""
+    def test_a_length_outside_the_contract_has_no_bucket(self, monkeypatch):
+        """Past max_model_len there is no bucket by design."""
         b = SpyreAttnBucketer(make_config(max_model_len=2048))
-        with pytest.raises(AssertionError, match="no attention bucket"):
-            b.dispatch(2049, 1)
+        assert b.find_kv_bucket(2049) is None
 
     def test_parse_buckets_rejects_non_positive(self):
         with pytest.raises(ValueError):

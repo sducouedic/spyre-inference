@@ -86,9 +86,9 @@ def _resolve_buckets(
     Every axis must have an entry at or above its limit (max_model_len for kv,
     max_num_batched_tokens for query), because that limit bounds the lengths the
     engine can schedule. A shorter top entry would leave the range between the
-    two with no bucket to round onto, and ``dispatch`` would miss for exactly the
-    batches warmup was meant to cover -- putting an Inductor compile in the
-    serving path.
+    two with no bucket to round onto, and the runtime lookup would miss for
+    exactly the batches warmup was meant to cover -- putting an Inductor compile
+    in the serving path.
 
     Only an override can be short: both defaults are built to end at their limit,
     so ``default()`` is returned as-is. Entries *above* the limit are left alone
@@ -115,7 +115,7 @@ def _resolve_buckets(
 
 
 class SpyreAttnBucketer:
-    """Enumerates attention variants to record, and dispatches to them.
+    """Enumerates the attention variants to record, and rounds lengths onto them.
 
     Both axes round *up*: a runtime length lands on the smallest recorded
     bucket that fits it, matching ``SpyreShapeBucketer.find_bucket``. Over-max
@@ -222,30 +222,6 @@ class SpyreAttnBucketer:
         idx = bisect.bisect_left(buckets, n)
         return buckets[idx] if idx < len(buckets) else None
 
-    def dispatch(self, kv_len: int, query_len: int) -> SpyreAttnBucket | None:
-        """Map a concrete (kv_len, query_len) onto a recorded variant.
-
-        ``store_mode``/``needs_gather`` are decided per call by ``forward``
-        against buffers this class cannot see, so the returned bucket carries
-        the reachable-worst-case combination: an indexed store behind a gather.
-        """
-        padded_query_len = self.find_query_bucket(query_len)
-        kv_bucket = self.find_kv_bucket(kv_len)
-        if padded_query_len is None or kv_bucket is None:
-            raise AssertionError(
-                f"no attention bucket for kv_len={kv_len}, query_len={query_len}: "
-                f"kv buckets top out at {self._kv_buckets[-1]} (>= max_model_len) and "
-                f"query buckets at {self._query_buckets[-1]} "
-                f"(>= max_num_batched_tokens), so both lengths should have fit."
-            )
-        num_blocks = (kv_bucket + self.block_size - 1) // self.block_size
-        return SpyreAttnBucket(
-            num_blocks=num_blocks,
-            padded_query_len=padded_query_len,
-            store_mode="index",
-            needs_gather=True,
-        )
-
     def variants(self) -> list[SpyreAttnBucket]:
         """Every variant worth recording, largest first.
 
@@ -261,18 +237,30 @@ class SpyreAttnBucketer:
         the bucket would prune exactly that variant and put a compile back in the
         serving path.
 
-        The flag axes are pruned against ``forward``'s dispatch logic:
-        - ``needs_gather=False`` requires the sequence to own the whole query
-          buffer from row 0, which is exactly the single-sequence batch. That
-          also makes ``output.shape[0] == query_len``, so the store is a
-          ``copy_``; ``"index"`` is unreachable there.
-        - ``needs_gather=True`` means the sequence owns a strict slice, so
-          ``output.shape[0] != query_len`` and ``"copy"`` is unreachable.
-        - ``store_mode="none"`` is the un-fused fallback (``fused_store_ok``
-          false, e.g. a misaligned per-layer output buffer) and pairs with
-          either gather setting.
+        The flag axes are not restated here: the inputs each bucket admits are
+        enumerated and fed through ``forward``'s own resolvers, so the recorded
+        set follows the backend by construction.
+
+        The two flags are independent above the decode bucket, because they read
+        different things. ``store_mode`` follows the *batch* width
+        (``output.shape[0]``, a body bucket): a one-token batch takes ``"copy"``,
+        anything wider takes ``"index"``. ``needs_gather`` follows the *query
+        buffer*: false only when one sequence owns it whole from row 0. So a
+        single-sequence prefill filling the buffer exactly gives
+        ``("index", False)``, and ``"copy"`` can only occur at
+        ``padded_query_len == 1`` (a one-token batch has ``max_query_len == 1``,
+        which ``build()`` exempts from query padding).
+
+        ``store_mode="none"`` is the un-fused fallback (a per-layer output buffer
+        whose dtype/offset/contiguity rules the fused store out) and pairs with
+        either gather setting.
         """
-        flag_pairs = (("index", True), ("none", True), ("copy", False), ("none", False))
+        # Imported at call time; see __init__ for why module scope would be circular.
+        from spyre_inference.v1.attention.backends.spyre_attn import (
+            resolve_needs_gather,
+            resolve_store_mode,
+        )
+
         # Smallest real query_len that rounds up to each bucket: one past the
         # bucket below it (and 1 for the smallest bucket).
         ascending = sorted(self._query_buckets)
@@ -285,7 +273,28 @@ class SpyreAttnBucketer:
             for padded_query_len in sorted(self._query_buckets, reverse=True):
                 if min_real_query[padded_query_len] > max_query_here:
                     continue
-                for store_mode, needs_gather in flag_pairs:
+                # `output` and `query` are the same batch-wide row count (both
+                # sized from query.shape[0]), so both resolvers read one shared
+                # input: how many rows the batch has. Only the decode bucket can
+                # be a one-row batch, and there the lone sequence owns row 0 of a
+                # 1-row buffer -- so "copy" and needs_gather=False come as a
+                # pair. It also reaches the wider case: several sequences of one
+                # token each still pad to aligned_max_query_len == 1.
+                row_counts = (1, 2) if padded_query_len == 1 else (padded_query_len,)
+                flag_pairs = {
+                    (
+                        resolve_store_mode(fused_store_ok, rows),
+                        resolve_needs_gather(q_start, padded_query_len, padded_query_len, rows),
+                    )
+                    for fused_store_ok in (True, False)
+                    for rows in row_counts
+                    # Owning the buffer whole from row 0, versus a strict slice.
+                    for q_start in (0, 1)
+                    # A sequence cannot start past the buffer it lives in, so a
+                    # one-row batch admits only q_start == 0.
+                    if q_start < rows
+                }
+                for store_mode, needs_gather in sorted(flag_pairs):
                     out.append(
                         SpyreAttnBucket(
                             num_blocks=num_blocks,

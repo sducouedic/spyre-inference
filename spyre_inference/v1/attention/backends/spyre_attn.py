@@ -174,6 +174,39 @@ def _reshape_and_cache_kernel(key, value, k_slots, v_slots, slot_mapping):
     v_slots.index_copy_(0, slot_mapping, value)
 
 
+def resolve_needs_gather(
+    q_start: int, query_len: int, aligned_max_query_len: int, query_rows: int
+) -> bool:
+    """Whether the kernel must gather its sequence's rows out of the query buffer.
+
+    False only when this sequence *is* the whole buffer from row 0: selecting the
+    whole buffer instead faults the device (see the kernel's gather).
+
+    Shared with SpyreAttnBucketer.variants() so the recorded set and the runtime
+    dispatch cannot drift apart.
+    """
+    return not (
+        q_start == 0 and query_len == aligned_max_query_len and query_rows == aligned_max_query_len
+    )
+
+
+def resolve_store_mode(fused_store_ok: bool, output_rows: int) -> str:
+    """How the kernel writes into the caller's output buffer.
+
+    ``"none"`` is the un-fused fallback (a per-layer buffer whose
+    dtype/offset/contiguity rules the fused store out). Otherwise the mode
+    follows the *batch* width: ``index_copy_`` writes nothing to a single-row
+    destination (torch-spyre#4007), which is the one-token batch, so that case
+    copies instead.
+
+    Shared with SpyreAttnBucketer.variants() so the recorded set and the runtime
+    dispatch cannot drift apart.
+    """
+    if not fused_store_ok:
+        return "none"
+    return "copy" if output_rows == 1 else "index"
+
+
 # ---------------------------------------------------------------------------
 # Compilable factory functions
 # ---------------------------------------------------------------------------
@@ -1528,9 +1561,11 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         out = None
         if bucket.store_mode != "none":
-            # "copy" owns every row; "index" scatters into a strictly larger
-            # buffer, which is what makes its store indirect at runtime.
-            out_rows = q_len if bucket.store_mode == "copy" else q_len + 1
+            # "copy" is the one-token batch (resolve_store_mode), so its
+            # destination is a single row; "index" scatters into a strictly
+            # larger buffer, which is what makes its store indirect at runtime.
+            assert bucket.store_mode != "copy" or q_len == 1
+            out_rows = 1 if bucket.store_mode == "copy" else q_len + 1
             out = convert(
                 torch.zeros(out_rows, self.num_heads, self.head_size, dtype=self.model_dtype),
                 device=device,
@@ -1813,22 +1848,12 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                     bias = self.alibi_slopes * rel
                     alibi_bias_tiles.append(convert(bias, device=_target_device))
 
-            # Selecting the whole buffer faults the device; see the kernel's gather.
-            needs_gather = not (
-                q_start == 0
-                and query_len == aligned_max_query_len
-                and query_dev.shape[0] == aligned_max_query_len
+            needs_gather = resolve_needs_gather(
+                q_start, query_len, aligned_max_query_len, query_dev.shape[0]
             )
-
-            store_mode = "none"
-            if fused_store_ok:
-                # index_copy_ writes nothing to a single-row destination
-                # (torch-spyre#4007), which is the batch-1 decode shape.
-                if output.shape[0] == 1:
-                    assert query_len == 1 and q_start == 0
-                    store_mode = "copy"
-                else:
-                    store_mode = "index"
+            store_mode = resolve_store_mode(fused_store_ok, output.shape[0])
+            if store_mode == "copy":
+                assert query_len == 1 and q_start == 0
 
             row_table = None
             if needs_gather or store_mode == "index":
