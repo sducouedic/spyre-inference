@@ -727,10 +727,11 @@ class TorchSpyreModelRunner(GPUModelRunner):
         total = 0
         # The metadata builders' own bucketer, not a second one built here: every
         # bucket recorded below is then a bucket build() can actually produce.
+        # Never None here: the KV cache assert above means at least one attention
+        # group exists, and every Spyre backend builds SpyreAttentionMetadataBuilder,
+        # which always sets a bucketer.
         bucketer = self._resolve_builder_attn_bucketer()
-        if bucketer is None:
-            logger.info("No attention metadata builder exposes buckets; nothing to record")
-            return
+        assert bucketer is not None, "No attention metadata builder exposes a bucketer"
         with _set_spyre_compilation_settings(self.vllm_config):
             for layer_name, kv_cache in self._spyre_kv_caches.items():
                 layer = static_ctx.get(layer_name)
