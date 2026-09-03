@@ -146,8 +146,6 @@ class SpyreAttnBucketer:
             {(kv + block_size - 1) // block_size for kv in self._kv_buckets}
         )
 
-        self._is_warmed_up = False
-
         logger.info(
             "SpyreAttnBucketer: %d kv buckets [%d..%d], %d query buckets [%d..%d], "
             "max num_blocks=%d",
@@ -171,13 +169,6 @@ class SpyreAttnBucketer:
     @property
     def num_blocks_buckets(self) -> list[int]:
         return self._num_blocks_buckets
-
-    @property
-    def is_warmed_up(self) -> bool:
-        return self._is_warmed_up
-
-    def mark_warmed_up(self) -> None:
-        self._is_warmed_up = True
 
     def find_kv_bucket(self, kv_len: int) -> int | None:
         return self._round_up(kv_len, self._kv_buckets)

@@ -610,8 +610,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # which asserts the two sets agree. They must, because build() now
         # rounds num_blocks onto these buckets — a divergence would make *every*
         # request miss the recorded set, strictly worse than not padding.
-        # (mark_warmed_up() is only ever called on the recorder's instance;
-        # nothing reads is_warmed_up, so this one's flag stays False.)
         self._attn_bucketer = SpyreAttnBucketer(vllm_config)
 
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:

@@ -225,15 +225,6 @@ class TestEnvOverride:
         assert _parse_buckets(None) is None
 
 
-class TestBucketerState:
-    def test_initial_state_not_warmed_up(self, bucketer):
-        assert not bucketer.is_warmed_up
-
-    def test_mark_warmed_up(self, bucketer):
-        bucketer.mark_warmed_up()
-        assert bucketer.is_warmed_up
-
-
 class TestBucketKey:
     def test_key_matches_attn_fn_cache_tuple(self):
         b = SpyreAttnBucket(
