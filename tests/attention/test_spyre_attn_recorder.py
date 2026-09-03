@@ -138,10 +138,11 @@ class TestRecordGraphs:
         from tests.attention.test_spyre_attn import _padded_mask_metadata
 
         # Built from the live config, not make_bucketer's narrower stand-in: the
-        # metadata below comes from a real SpyreAttentionMetadataBuilder, which
-        # constructs its own bucketer from that same config. In production the two
-        # instances are identical by construction; hand-narrowed buckets here
-        # would only test a divergence that cannot happen.
+        # metadata below comes from a real SpyreAttentionMetadataBuilder, whose
+        # own bucketer derives from that same config, so the two hold the same
+        # buckets. In production the recorder reads the builder's instance back
+        # (spyre_model_runner._resolve_builder_attn_bucketer) rather than building one;
+        # hand-narrowed buckets here would test a divergence that cannot happen.
         vllm_config = get_current_vllm_config()
         bucketer = SpyreAttnBucketer(vllm_config)
         impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)

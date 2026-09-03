@@ -603,13 +603,13 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         self._num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
         self._num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_blocks_per_seq)
 
-        # Query- and block-count buckets shared with the warmup recorder, so a
-        # batch built here dispatches to a kernel that pass already compiled.
-        # This is a second instance: the recorder builds its own from the
-        # allocated page shape (spyre_model_runner._record_attention_graphs),
-        # which asserts the two sets agree. They must, because build() now
-        # rounds num_blocks onto these buckets — a divergence would make *every*
-        # request miss the recorded set, strictly worse than not padding.
+        # Query- and block-count buckets for the batches this builder produces.
+        # The builder owns them because build() is what rounds num_blocks onto
+        # them; the warmup recorder then reads this very instance back off the
+        # attention groups (spyre_model_runner._record_attention_graphs) and
+        # records exactly these buckets. One object, so a bucket that build()
+        # can emit is a bucket that was compiled -- a divergence would make
+        # *every* request miss the recorded set, strictly worse than not padding.
         self._attn_bucketer = SpyreAttnBucketer(vllm_config)
 
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:
