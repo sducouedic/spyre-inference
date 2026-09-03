@@ -85,7 +85,7 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     SpyreAttentionImpl,
     SpyrePagedKVCache,
 )
-from spyre_inference.v1.attention.spyre_attn_bucketer import get_attn_bucketer
+from spyre_inference.v1.attention.spyre_attn_bucketer import SpyreAttnBucketer
 from spyre_inference.v1.pool import (
     configure_pooling_for_spyre,
     copy_pooler_output_to_cpu,
@@ -725,9 +725,12 @@ class TorchSpyreModelRunner(GPUModelRunner):
         static_ctx = self.compilation_config.static_forward_context
         t0 = time.time()
         total = 0
-        # The same instance the metadata builders dispatch against, so every
-        # bucket recorded here is a bucket build() can actually produce.
-        bucketer = get_attn_bucketer(self.vllm_config)
+        # The metadata builders' own bucketer, not a second one built here: every
+        # bucket recorded below is then a bucket build() can actually produce.
+        bucketer = self._builder_attn_bucketer()
+        if bucketer is None:
+            logger.info("No attention metadata builder exposes buckets; nothing to record")
+            return
         with _set_spyre_compilation_settings(self.vllm_config):
             for layer_name, kv_cache in self._spyre_kv_caches.items():
                 layer = static_ctx.get(layer_name)
@@ -743,6 +746,48 @@ class TorchSpyreModelRunner(GPUModelRunner):
             total,
             time.time() - t0,
         )
+
+    def _builder_attn_bucketer(self) -> SpyreAttnBucketer | None:
+        """The attention bucketer the metadata builders dispatch against.
+
+        Returned rather than constructed so the recorder compiles the very
+        buckets ``build()`` rounds onto: the builder owns the instance, and a
+        second one built here could drift from it, which would make *every*
+        request pad to a block count that was never recorded -- strictly worse
+        than not padding at all.
+
+        A model can have several attention groups (one per backend/kv_cache_spec
+        pair, e.g. mixed sliding-window), and ubatching gives each group several
+        builders. Every one of them derives its buckets from ``cache_config`` and
+        ``model_config`` alone, so they agree by construction; the check below is
+        here to catch a future spec-dependent bucket rather than a live bug.
+
+        Returns None when no builder exposes a bucketer, which leaves nothing to
+        record.
+        """
+        first: SpyreAttnBucketer | None = None
+        for group in self._attn_group_iterator():
+            for builder in group.metadata_builders:
+                bucketer = getattr(builder, "_attn_bucketer", None)
+                if bucketer is None:
+                    continue
+                if first is None:
+                    first = bucketer
+                elif (bucketer.block_size, bucketer.num_blocks_buckets) != (
+                    first.block_size,
+                    first.num_blocks_buckets,
+                ):
+                    raise RuntimeError(
+                        "Attention bucketer buckets diverge between metadata "
+                        f"builders: {type(builder).__name__} has "
+                        f"block_size={bucketer.block_size} "
+                        f"num_blocks={bucketer.num_blocks_buckets}, expected "
+                        f"block_size={first.block_size} "
+                        f"num_blocks={first.num_blocks_buckets}. Only one set can be "
+                        "recorded, so a mismatch means some builder pads onto block "
+                        "counts no kernel was compiled for."
+                    )
+        return first
 
     def _determine_batch_execution_and_padding(
         self,

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass
-from weakref import ReferenceType, ref
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -259,48 +258,3 @@ class SpyreAttnBucketer:
                         )
                     )
         return out
-
-
-# One bucketer per VllmConfig, shared by every consumer. The metadata builder
-# rounds each sequence's num_blocks onto these buckets and the warmup recorder
-# compiles exactly those buckets, so the two must agree; sharing one instance
-# makes that hold by construction rather than by an after-the-fact assertion.
-#
-# Keyed by config identity because VllmConfig is an eq=True dataclass and so
-# unhashable, and because two configs that compare equal are still separate
-# engines. A weakref callback drops the entry when the config goes away, so the
-# many short-lived configs a test session builds are not pinned here.
-_bucketers: dict[int, SpyreAttnBucketer] = {}
-_bucketer_refs: dict[int, ReferenceType[VllmConfig]] = {}
-# Configs that cannot be weak-referenced, kept alive so their id() stays theirs.
-_bucketer_pins: dict[int, VllmConfig] = {}
-
-
-def get_attn_bucketer(vllm_config: VllmConfig) -> SpyreAttnBucketer:
-    """Return the one ``SpyreAttnBucketer`` belonging to ``vllm_config``.
-
-    Built on first call and memoized after: the buckets are a pure function of
-    the config, so every caller shares the same object -- and the same
-    ``is_warmed_up`` flag, which is what lets a reader downstream of warmup tell
-    whether the recorder has run.
-    """
-    key = id(vllm_config)
-    bucketer = _bucketers.get(key)
-    if bucketer is not None:
-        return bucketer
-    bucketer = SpyreAttnBucketer(vllm_config)
-    _bucketers[key] = bucketer
-    try:
-        _bucketer_refs[key] = ref(vllm_config, lambda _r, key=key: _forget(key))
-    except TypeError:
-        # Not weak-referenceable (some mocks and __slots__ stand-ins in tests).
-        # Pin the config instead: without a strong reference its id() could be
-        # handed to a later, unrelated config, which would then be served this
-        # bucketer. Leaks the entry for the process, which only tests hit.
-        _bucketer_pins[key] = vllm_config
-    return bucketer
-
-
-def _forget(key: int) -> None:
-    _bucketers.pop(key, None)
-    _bucketer_refs.pop(key, None)

@@ -14,8 +14,8 @@
 
 """Unit tests for SpyreAttnBucketer. No hardware required."""
 
-import gc
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,9 +25,7 @@ from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_t
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucket,
     SpyreAttnBucketer,
-    _bucketers,
     _parse_buckets,
-    get_attn_bucketer,
 )
 
 BLOCK_SIZE = 64
@@ -245,29 +243,56 @@ class TestBucketKey:
         assert b.key == (4, 32, "index", True)
 
 
-class TestSharedInstance:
-    """get_attn_bucketer is what keeps the builder and the recorder in step."""
+class TestBuilderAttnBucketer:
+    """The recorder takes the builders' bucketer instead of building its own."""
 
-    def test_same_config_returns_the_same_object(self):
-        config = make_config()
-        assert get_attn_bucketer(config) is get_attn_bucketer(config)
+    @staticmethod
+    def _runner(*group_bucketers):
+        """A bare runner whose attention groups hold the given bucketers.
 
-    def test_distinct_configs_get_distinct_bucketers(self):
-        first = get_attn_bucketer(make_config(max_model_len=2048))
-        second = get_attn_bucketer(make_config(max_model_len=4096))
-        assert first is not second
-        assert first.kv_buckets != second.kv_buckets
+        One argument per group, each a list of per-ubatch bucketers (or Nones for
+        a builder that exposes none).
+        """
+        from spyre_inference.v1.worker.spyre_model_runner import TorchSpyreModelRunner
 
-    def test_shared_instance_shares_warmed_up_flag(self):
-        config = make_config()
-        get_attn_bucketer(config).mark_warmed_up()
-        assert get_attn_bucketer(config).is_warmed_up
+        runner = TorchSpyreModelRunner.__new__(TorchSpyreModelRunner)
+        runner.attn_groups = [
+            [
+                SimpleNamespace(
+                    metadata_builders=[
+                        SimpleNamespace(_attn_bucketer=b) if b is not None else SimpleNamespace()
+                        for b in builders
+                    ]
+                )
+                for builders in group_bucketers
+            ]
+        ]
+        return runner
 
-    def test_entry_is_dropped_when_the_config_dies(self):
-        config = make_config()
-        key = id(config)
-        get_attn_bucketer(config)
-        assert key in _bucketers
-        del config
-        gc.collect()
-        assert key not in _bucketers
+    def test_returns_the_builders_instance(self):
+        bucketer = SpyreAttnBucketer(make_config())
+        runner = self._runner([bucketer])
+        assert runner._builder_attn_bucketer() is bucketer
+
+    def test_none_when_no_builder_exposes_one(self):
+        assert self._runner([None])._builder_attn_bucketer() is None
+        assert self._runner()._builder_attn_bucketer() is None
+
+    def test_agreeing_builders_are_accepted(self):
+        """Two groups, separately constructed from the same config: same buckets."""
+        first = SpyreAttnBucketer(make_config())
+        second = SpyreAttnBucketer(make_config())
+        runner = self._runner([first], [second])
+        assert runner._builder_attn_bucketer() is first
+
+    def test_diverging_builders_raise(self):
+        first = SpyreAttnBucketer(make_config(max_model_len=2048))
+        second = SpyreAttnBucketer(make_config(max_model_len=8192))
+        runner = self._runner([first], [second])
+        with pytest.raises(RuntimeError, match="diverge between metadata builders"):
+            runner._builder_attn_bucketer()
+
+    def test_skips_builders_without_a_bucketer(self):
+        bucketer = SpyreAttnBucketer(make_config())
+        runner = self._runner([None, bucketer])
+        assert runner._builder_attn_bucketer() is bucketer

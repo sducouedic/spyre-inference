@@ -44,7 +44,6 @@ from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucket,
     SpyreAttnBucketer,
-    get_attn_bucketer,
 )
 
 logger = init_logger(__name__)
@@ -604,12 +603,14 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         self._num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
         self._num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_blocks_per_seq)
 
-        # Query- and block-count buckets shared with the warmup recorder, so a
-        # batch built here dispatches to a kernel that pass already compiled.
-        # Same object, not a copy: build() rounds num_blocks onto these buckets,
-        # so buckets the recorder did not compile would make *every* request miss
-        # the recorded set — strictly worse than not padding at all.
-        self._attn_bucketer = get_attn_bucketer(vllm_config)
+        # Query- and block-count buckets for the batches this builder produces.
+        # The builder owns them because build() is what rounds num_blocks onto
+        # them; the warmup recorder then reads this very instance back off the
+        # attention groups (spyre_model_runner._record_attention_graphs) and
+        # records exactly these buckets. One object, so a bucket that build()
+        # can emit is a bucket that was compiled -- a divergence would make
+        # *every* request miss the recorded set, strictly worse than not padding.
+        self._attn_bucketer = SpyreAttnBucketer(vllm_config)
 
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
