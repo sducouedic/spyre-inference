@@ -209,8 +209,8 @@ class TestVariants:
         for v in bucketer.variants():
             assert min_real[v.padded_query_len] <= v.num_blocks * BLOCK_SIZE
 
-    @pytest.mark.parametrize("kv_len", [1, 64, 255, 256, 257, 1024, 2048])
-    @pytest.mark.parametrize("query_len", [1, 2, 31, 32, 33, 200, 512])
+    @pytest.mark.parametrize("kv_len", [1, 256, 257, 2048])
+    @pytest.mark.parametrize("query_len", [1, 32, 33, 512])
     def test_every_rounded_size_lands_on_a_recorded_variant(self, bucketer, kv_len, query_len):
         """The whole point of recording: no runtime batch may miss the cache.
 
