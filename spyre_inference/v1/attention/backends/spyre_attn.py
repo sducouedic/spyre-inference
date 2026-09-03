@@ -629,9 +629,10 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
     def _pad_num_blocks(self, num_blocks: int, max_blocks_available: int) -> int:
         """Round an active-block count up onto the recorder's num_blocks buckets.
 
-        Returns the input unchanged when the rounded count would exceed the
-        largest bucket or the block-table width. Both cases fall back to
-        compiling on demand, as before.
+        Returns the count unpadded when the bucket that fits is wider than the
+        block table, which costs a compile on demand but is otherwise correct.
+        Overrunning the buckets entirely is a different matter and asserts: see
+        below.
         """
         if num_blocks == 0:
             # Zero real blocks must stay zero: forward() early-outs to a zero
@@ -639,7 +640,22 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # softmax denominator.
             return 0
         padded = SpyreAttnBucketer._round_up(num_blocks, self._attn_bucketer.num_blocks_buckets)
-        if padded is None or padded > max_blocks_available:
+        # Unreachable: the top num_blocks bucket is ceil(kv_top / block_size) with
+        # kv_top >= max_model_len (SpyreAttnBucketer tops up a truncated
+        # SPYRE_ATTN_KV_BUCKETS override), while num_blocks here is
+        # ceil(seq_len / block_size) with seq_len <= max_model_len. Independent of
+        # SPYRE_ATTN_RECORD / CompilationMode.NONE: those gate only whether the
+        # buckets get pre-compiled, not how they are built.
+        assert padded is not None, (
+            f"num_blocks={num_blocks} exceeds the largest recorded bucket "
+            f"{self._attn_bucketer.num_blocks_buckets[-1]}, which should cover "
+            f"ceil(max_model_len / block_size)."
+        )
+        if padded > max_blocks_available:
+            # Routine, not an error: the block table is sized to the batch's own
+            # kv extent, so a bucket wider than it is common on short sequences.
+            # Unpadded is what this code did before bucketing existed -- correct,
+            # just a compile on demand.
             return num_blocks
         assert padded >= num_blocks
         return padded
@@ -882,14 +898,20 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             aligned_max_query_len = 1
         else:
             # Round to a recorded bucket so the kernel this batch needs was
-            # already compiled during warmup. The top query bucket is
-            # max_num_batched_tokens, which bounds max_query_len, so a miss here
-            # means the buckets were built wrong (e.g. a truncated
-            # SPYRE_ATTN_QUERY_BUCKETS override).
+            # already compiled during warmup. The top query bucket is at least
+            # max_num_batched_tokens -- SpyreAttnBucketer tops up a truncated
+            # SPYRE_ATTN_QUERY_BUCKETS override -- and that bounds max_query_len,
+            # so a miss here means a batch outside the scheduler's own contract.
+            #
+            # An assert rather than a fallback, unlike _pad_num_blocks: this is a
+            # tensor shape (it sizes the mask tiles and the query-row gather), so
+            # there is no unpadded value to carry on with -- None would only
+            # surface as a TypeError inside _build_attention_mask.
             aligned_max_query_len = self._attn_bucketer.find_query_bucket(max_query_len)
             assert aligned_max_query_len is not None, (
                 f"no query bucket for max_query_len={max_query_len}; top bucket is "
-                f"{self._attn_bucketer.query_buckets[-1]}"
+                f"{self._attn_bucketer.query_buckets[-1]}, which should be at least "
+                f"max_num_batched_tokens."
             )
 
         num_seqs = common_attn_metadata.num_reqs

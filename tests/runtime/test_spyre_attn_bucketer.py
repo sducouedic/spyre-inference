@@ -148,9 +148,13 @@ class TestDispatch:
         assert b is not None
         assert b.padded_query_len == 1
 
-    def test_over_max_on_either_axis_returns_none(self, bucketer):
-        assert bucketer.dispatch(kv_len=99999, query_len=32) is None
-        assert bucketer.dispatch(kv_len=256, query_len=99999) is None
+    def test_over_max_on_either_axis_raises(self, bucketer):
+        """Both axes are built to cover their limit, so an over-max length is a
+        contract violation by the caller, not a bucket set to fall back from."""
+        with pytest.raises(AssertionError, match="no attention bucket"):
+            bucketer.dispatch(kv_len=99999, query_len=32)
+        with pytest.raises(AssertionError, match="no attention bucket"):
+            bucketer.dispatch(kv_len=256, query_len=99999)
 
     def test_descriptor_is_frozen(self, bucketer):
         b = bucketer.dispatch(kv_len=256, query_len=1)
@@ -206,6 +210,7 @@ class TestVariants:
 
 class TestEnvOverride:
     def test_kv_buckets_override(self, monkeypatch):
+        """Kept verbatim: the top entry already covers max_model_len=2048."""
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,512,4096")
         envs.clear_env_cache()
         b = SpyreAttnBucketer(make_config())
@@ -214,8 +219,49 @@ class TestEnvOverride:
     def test_query_buckets_override_is_sorted_and_deduped(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_QUERY_BUCKETS", "64,1,16,64")
         envs.clear_env_cache()
-        b = SpyreAttnBucketer(make_config())
+        b = SpyreAttnBucketer(make_config(max_num_batched_tokens=64))
         assert b.query_buckets == [1, 16, 64]
+
+    def test_truncated_kv_override_is_topped_up_to_max_model_len(self, monkeypatch):
+        """A short override would otherwise leave (512, 2048] with no bucket."""
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,512")
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=2048))
+        assert b.kv_buckets == [128, 512, 2048]
+        assert b.find_kv_bucket(2048) == 2048
+
+    def test_truncated_query_override_is_topped_up_to_max_batched(self, monkeypatch):
+        monkeypatch.setenv("SPYRE_ATTN_QUERY_BUCKETS", "1,16")
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_num_batched_tokens=512))
+        assert b.query_buckets == [1, 16, 512]
+        assert b.find_query_bucket(512) == 512
+
+    def test_override_above_the_limit_is_left_alone(self, monkeypatch):
+        """Entries past the limit are unreachable, not wrong; don't prune them."""
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,8192")
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=2048))
+        assert b.kv_buckets == [128, 8192]
+
+    def test_dispatch_covers_every_in_contract_length_under_a_short_override(self, monkeypatch):
+        """The point of the top-up: no in-contract batch falls off either axis."""
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128")
+        monkeypatch.setenv("SPYRE_ATTN_QUERY_BUCKETS", "1")
+        envs.clear_env_cache()
+        max_model_len, max_batched = 1024, 256
+        b = SpyreAttnBucketer(make_config(max_model_len, max_batched))
+        for kv_len in (1, 129, 500, max_model_len):
+            for query_len in (1, 2, 200, max_batched):
+                if query_len > kv_len:
+                    continue
+                assert b.dispatch(kv_len, query_len) is not None
+
+    def test_dispatch_rejects_a_length_outside_the_contract(self, monkeypatch):
+        """Past max_model_len there is no bucket by design -- and no silent None."""
+        b = SpyreAttnBucketer(make_config(max_model_len=2048))
+        with pytest.raises(AssertionError, match="no attention bucket"):
+            b.dispatch(2049, 1)
 
     def test_parse_buckets_rejects_non_positive(self):
         with pytest.raises(ValueError):

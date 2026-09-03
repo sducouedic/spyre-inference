@@ -31,6 +31,7 @@ consecutive buckets is the *bucket step*.
 from __future__ import annotations
 
 import bisect
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vllm.config import VllmConfig
@@ -77,6 +78,42 @@ def _parse_buckets(raw: str | None) -> list[int] | None:
     return values
 
 
+def _resolve_buckets(
+    raw: str | None, limit: int, name: str, default: Callable[[], list[int]]
+) -> list[int]:
+    """One axis's buckets: the env override topped up to ``limit``, else ``default()``.
+
+    Every axis must have an entry at or above its limit (max_model_len for kv,
+    max_num_batched_tokens for query), because that limit bounds the lengths the
+    engine can schedule. A shorter top entry would leave the range between the
+    two with no bucket to round onto, and ``dispatch`` would miss for exactly the
+    batches warmup was meant to cover -- putting an Inductor compile in the
+    serving path.
+
+    Only an override can be short: both defaults are built to end at their limit,
+    so ``default()`` is returned as-is. Entries *above* the limit are left alone
+    too -- unreachable rather than wrong, and pruning them would silently discard
+    something the operator asked for.
+    """
+    buckets = _parse_buckets(raw)
+    if buckets is None:
+        return default()
+    if buckets[-1] < limit:
+        logger.warning(
+            "%s tops out at %d, below the %d it must cover; appending %d. Lengths in "
+            "(%d, %d] would otherwise have no recorded bucket and would compile an "
+            "attention kernel in the serving path.",
+            name,
+            buckets[-1],
+            limit,
+            limit,
+            buckets[-1],
+            limit,
+        )
+        buckets = [*buckets, limit]
+    return buckets
+
+
 class SpyreAttnBucketer:
     """Enumerates attention variants to record, and dispatches to them.
 
@@ -108,35 +145,39 @@ class SpyreAttnBucketer:
                 block_size,
             )
 
-        kv = _parse_buckets(envs.SPYRE_ATTN_KV_BUCKETS)
-        if kv is None:
-            # Powers of two from block_size up to (and including) max_model_len.
-            # Doubling keeps warmup affordable: the recorded set is a product of
-            # both axes, so a bucket per KV token up to a 32k context would be tens
-            # of thousands of variants. Each bucket is at most 2x the one below,
-            # which the mask absorbs as ordinary padding.
-            #
-            # Starting at block_size rather than 1 drops buckets that buy nothing:
-            # num_blocks (below) is ceil(kv / block_size), so every kv <= block_size
-            # collapses to num_blocks == 1 and would be deduped away anyway.
-            kv = list(_powers_of_two_up_to(max_model_len, start=block_size))
-        self._kv_buckets: list[int] = kv
+        # Default: powers of two from block_size up to (and including)
+        # max_model_len. Doubling keeps warmup affordable -- the recorded set is a
+        # product of both axes, so a bucket per KV token up to a 32k context would
+        # be tens of thousands of variants. Each bucket is at most 2x the one
+        # below, which the mask absorbs as ordinary padding.
+        #
+        # Starting at block_size rather than 1 drops buckets that buy nothing:
+        # num_blocks (below) is ceil(kv / block_size), so every kv <= block_size
+        # collapses to num_blocks == 1 and would be deduped away anyway.
+        self._kv_buckets: list[int] = _resolve_buckets(
+            envs.SPYRE_ATTN_KV_BUCKETS,
+            max_model_len,
+            "SPYRE_ATTN_KV_BUCKETS",
+            lambda: list(_powers_of_two_up_to(max_model_len, start=block_size)),
+        )
 
-        query = _parse_buckets(envs.SPYRE_ATTN_QUERY_BUCKETS)
-        if query is None:
-            # [1] then multiples of a fixed step up to (and including)
-            # max_num_batched_tokens. Coarse bucketing for now: a prefill pays
-            # padding up to the next bucket, which the mask discards.
-            #
-            # 1 is the decode-only batch, which build() exempts from query padding
-            # entirely. The step is capped at 512 so a large
-            # max_num_batched_tokens does not make the single non-decode bucket
-            # enormous; the multiples then carry the buckets up to the top, so a
-            # query_len above the step still finds a bucket rather than falling
-            # off the end into a serving-path compile.
-            step = min(_DEFAULT_QUERY_BUCKET_STEP, max_batched)
-            query = sorted({1, *range(step, max_batched + 1, step), max_batched})
-        self._query_buckets: list[int] = query
+        # Default: [1] then multiples of a fixed step up to (and including)
+        # max_num_batched_tokens. Coarse bucketing for now: a prefill pays padding
+        # up to the next bucket, which the mask discards.
+        #
+        # 1 is the decode-only batch, which build() exempts from query padding
+        # entirely. The step is capped at 512 so a large max_num_batched_tokens
+        # does not make the single non-decode bucket enormous; the multiples then
+        # carry the buckets up to the top, so a query_len above the step still
+        # finds a bucket rather than falling off the end into a serving-path
+        # compile.
+        step = min(_DEFAULT_QUERY_BUCKET_STEP, max_batched)
+        self._query_buckets: list[int] = _resolve_buckets(
+            envs.SPYRE_ATTN_QUERY_BUCKETS,
+            max_batched,
+            "SPYRE_ATTN_QUERY_BUCKETS",
+            lambda: sorted({1, *range(step, max_batched + 1, step), max_batched}),
+        )
 
         # num_blocks is what the kernel specializes on. Deriving it from the kv
         # buckets rather than enumerating every integer up to max_model_len /
@@ -191,7 +232,12 @@ class SpyreAttnBucketer:
         padded_query_len = self.find_query_bucket(query_len)
         kv_bucket = self.find_kv_bucket(kv_len)
         if padded_query_len is None or kv_bucket is None:
-            return None
+            raise AssertionError(
+                f"no attention bucket for kv_len={kv_len}, query_len={query_len}: "
+                f"kv buckets top out at {self._kv_buckets[-1]} (>= max_model_len) and "
+                f"query buckets at {self._query_buckets[-1]} "
+                f"(>= max_num_batched_tokens), so both lengths should have fit."
+            )
         num_blocks = (kv_bucket + self.block_size - 1) // self.block_size
         return SpyreAttnBucket(
             num_blocks=num_blocks,
