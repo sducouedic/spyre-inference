@@ -1383,9 +1383,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         variants = bucketer.variants()
         t_start = time.time()
 
-        # Each variant is a distinct function object, but dynamo's accumulated
-        # recompile limit is global, so more buckets than it allows silently stops
-        # compiling partway through and the rest fall back to eager.
+        # Belt-and-suspenders: platform._raise_dynamo_recompile_limits already
+        # raises this globally, but bump it here too in case that hasn't run.
         prev_limit = torch._dynamo.config.accumulated_recompile_limit
         torch._dynamo.config.accumulated_recompile_limit = max(  # ty: ignore[invalid-assignment]
             prev_limit, 4 * len(variants) + 64
