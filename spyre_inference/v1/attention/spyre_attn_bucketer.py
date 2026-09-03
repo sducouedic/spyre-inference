@@ -19,9 +19,9 @@
 first use, which puts a full Inductor compile in the serving path. This module
 enumerates the keys a run can reach so warmup can record them all up front.
 
-Separate from ``SpyreShapeBucketer``: that one dispatches a single
-``num_tokens`` int for the model graph, whereas an attention variant is 2-D
-(a kv_len bucket and a query_len bucket) plus two discrete flags.
+Separate from ``SpyreShapeBucketer``, which dispatches a single ``num_tokens``
+int for the model graph; an attention variant is 2-D (kv_len and query_len
+buckets) plus two discrete flags.
 
 Vocabulary: a *bucket* is one padded size a runtime length rounds up onto; the
 sorted list of them for one axis is that axis's *buckets*; the spacing between
@@ -83,17 +83,11 @@ def _resolve_buckets(
 ) -> list[int]:
     """One axis's buckets: the env override topped up to ``limit``, else ``default()``.
 
-    Every axis must have an entry at or above its limit (max_model_len for kv,
-    max_num_batched_tokens for query), because that limit bounds the lengths the
-    engine can schedule. A shorter top entry would leave the range between the
-    two with no bucket to round onto, and the runtime lookup would miss for
-    exactly the batches warmup was meant to cover -- putting an Inductor compile
-    in the serving path.
-
-    Only an override can be short: both defaults are built to end at their limit,
-    so ``default()`` is returned as-is. Entries *above* the limit are left alone
-    too -- unreachable rather than wrong, and pruning them would silently discard
-    something the operator asked for.
+    ``limit`` bounds the lengths the engine can schedule (max_model_len for kv,
+    max_num_batched_tokens for query); an override topping out below it would
+    leave that range with no bucket, missing the lookup for batches warmup was
+    meant to cover. Only an override can be short (defaults already end at their
+    limit). Entries above the limit are left alone -- unreachable, not wrong.
     """
     buckets = _parse_buckets(raw)
     if buckets is None:
@@ -134,10 +128,8 @@ class SpyreAttnBucketer:
 
         if block_size & (block_size - 1):
             # Not fatal: _powers_of_two_up_to rounds the start up to a power of
-            # two, so the buckets are still correct -- just coarser at the bottom
-            # than a power-of-two block_size would give. Worth saying out loud
-            # because the platform only forces a multiple of 64 (see
-            # SpyrePlatform.check_and_update_config), so this is reachable.
+            # two, just coarser at the bottom. Reachable because the platform
+            # only forces a multiple of 64 (SpyrePlatform.check_and_update_config).
             logger.warning(
                 "block_size=%d is not a power of two; the smallest KV bucket is the next "
                 "power of two instead, making it larger than one block. Prefer a "
@@ -145,15 +137,12 @@ class SpyreAttnBucketer:
                 block_size,
             )
 
-        # Default: powers of two from block_size up to (and including)
-        # max_model_len. Doubling keeps warmup affordable -- the recorded set is a
-        # product of both axes, so a bucket per KV token up to a 32k context would
-        # be tens of thousands of variants. Each bucket is at most 2x the one
-        # below, which the mask absorbs as ordinary padding.
-        #
-        # Starting at block_size rather than 1 drops buckets that buy nothing:
-        # num_blocks (below) is ceil(kv / block_size), so every kv <= block_size
-        # collapses to num_blocks == 1 and would be deduped away anyway.
+        # Default: powers of two from block_size up to max_model_len. The
+        # recorded set is a product of both axes, so a bucket per KV token at a
+        # 32k context would be tens of thousands of variants; doubling keeps it
+        # affordable, with each bucket's extra padding absorbed by the mask.
+        # Starting at block_size rather than 1 skips buckets that would dedupe
+        # away anyway, since num_blocks = ceil(kv / block_size).
         self._kv_buckets: list[int] = _resolve_buckets(
             envs.SPYRE_ATTN_KV_BUCKETS,
             max_model_len,
@@ -161,16 +150,11 @@ class SpyreAttnBucketer:
             lambda: list(_powers_of_two_up_to(max_model_len, start=block_size)),
         )
 
-        # Default: [1] then multiples of a fixed step up to (and including)
-        # max_num_batched_tokens. Coarse bucketing for now: a prefill pays padding
-        # up to the next bucket, which the mask discards.
-        #
-        # 1 is the decode-only batch, which build() exempts from query padding
-        # entirely. The step is capped at 512 so a large max_num_batched_tokens
-        # does not make the single non-decode bucket enormous; the multiples then
-        # carry the buckets up to the top, so a query_len above the step still
-        # finds a bucket rather than falling off the end into a serving-path
-        # compile.
+        # Default: [1] (the decode-only batch, exempt from query padding by
+        # build()) then multiples of a step up to max_num_batched_tokens. Coarse
+        # bucketing: a prefill pays padding up to the next bucket, which the mask
+        # discards. The step is capped at 512 so a large max_num_batched_tokens
+        # doesn't make the one non-decode bucket enormous.
         step = min(_DEFAULT_QUERY_BUCKET_STEP, max_batched)
         self._query_buckets: list[int] = _resolve_buckets(
             envs.SPYRE_ATTN_QUERY_BUCKETS,
@@ -179,10 +163,9 @@ class SpyreAttnBucketer:
             lambda: sorted({1, *range(step, max_batched + 1, step), max_batched}),
         )
 
-        # num_blocks is what the kernel specializes on. Deriving it from the kv
-        # buckets rather than enumerating every integer up to max_model_len /
-        # block_size is what keeps the recorded set small: one block count per
-        # kv bucket, not one per possible block count.
+        # num_blocks is what the kernel specializes on. Derived from the kv
+        # buckets, one block count per kv bucket, rather than enumerating every
+        # integer up to max_model_len / block_size.
         self._num_blocks_buckets: list[int] = sorted(
             {(kv + block_size - 1) // block_size for kv in self._kv_buckets}
         )
@@ -225,35 +208,23 @@ class SpyreAttnBucketer:
     def variants(self) -> list[SpyreAttnBucket]:
         """Every variant worth recording, largest first.
 
-        The two size axes are not independent: a sequence holding
-        ``query_len`` new tokens has ``kv_len >= query_len``, so a query bucket
-        can only appear with block counts that can hold it. Taking the full
-        cross product instead would record many unreachable variants at a long
-        context.
-
+        The two size axes aren't independent: ``kv_len >= query_len`` always, so
+        a query bucket only pairs with block counts that can hold it -- the full
+        cross product would record many unreachable variants at a long context.
         The bound is on the *smallest real* query_len that reaches a bucket, not
-        on the bucket itself: a bucket is a padded value, so a 2-token query on a
-        1-block sequence legitimately dispatches to the 512 bucket. Bounding by
-        the bucket would prune exactly that variant and put a compile back in the
-        serving path.
+        the bucket itself, since a 2-token query on a 1-block sequence still
+        dispatches to a large padded bucket; bounding by the bucket would prune
+        that variant and put a compile back in the serving path.
 
-        The flag axes are not restated here: the inputs each bucket admits are
-        enumerated and fed through ``forward``'s own resolvers, so the recorded
-        set follows the backend by construction.
-
-        The two flags are independent above the decode bucket, because they read
-        different things. ``store_mode`` follows the *batch* width
-        (``output.shape[0]``, a body bucket): a one-token batch takes ``"copy"``,
-        anything wider takes ``"index"``. ``needs_gather`` follows the *query
-        buffer*: false only when one sequence owns it whole from row 0. So a
-        single-sequence prefill filling the buffer exactly gives
-        ``("index", False)``, and ``"copy"`` can only occur at
-        ``padded_query_len == 1`` (a one-token batch has ``max_query_len == 1``,
-        which ``build()`` exempts from query padding).
-
-        ``store_mode="none"`` is the un-fused fallback (a per-layer output buffer
-        whose dtype/offset/contiguity rules the fused store out) and pairs with
-        either gather setting.
+        The flags aren't enumerated directly -- each bucket's inputs are fed
+        through ``forward``'s own resolvers, so the recorded set follows the
+        backend by construction. Above the decode bucket the two flags vary
+        independently: ``store_mode`` follows batch width (one-token -> "copy",
+        wider -> "index"); ``needs_gather`` follows whether one sequence owns the
+        query buffer whole from row 0. ``"copy"`` is thus only reachable at
+        ``padded_query_len == 1``, where ``build()`` exempts the batch from query
+        padding. ``store_mode="none"`` (the un-fused fallback) pairs with either
+        gather setting.
         """
         # Imported at call time; see __init__ for why module scope would be circular.
         from spyre_inference.v1.attention.backends.spyre_attn import (
@@ -262,7 +233,7 @@ class SpyreAttnBucketer:
         )
 
         # Smallest real query_len that rounds up to each bucket: one past the
-        # bucket below it (and 1 for the smallest bucket).
+        # bucket below (1 for the smallest).
         ascending = sorted(self._query_buckets)
         min_real_query = {
             bucket: (ascending[i - 1] + 1 if i else 1) for i, bucket in enumerate(ascending)
@@ -273,13 +244,10 @@ class SpyreAttnBucketer:
             for padded_query_len in sorted(self._query_buckets, reverse=True):
                 if min_real_query[padded_query_len] > max_query_here:
                     continue
-                # `output` and `query` are the same batch-wide row count (both
-                # sized from query.shape[0]), so both resolvers read one shared
-                # input: how many rows the batch has. Only the decode bucket can
-                # be a one-row batch, and there the lone sequence owns row 0 of a
-                # 1-row buffer -- so "copy" and needs_gather=False come as a
-                # pair. It also reaches the wider case: several sequences of one
-                # token each still pad to aligned_max_query_len == 1.
+                # `output` and `query` share one row count (query.shape[0]), the
+                # only input both resolvers read. At the decode bucket that count
+                # can be 1 (lone sequence owning row 0) or more (several one-token
+                # sequences also padding to aligned_max_query_len == 1).
                 row_counts = (1, 2) if padded_query_len == 1 else (padded_query_len,)
                 flag_pairs = {
                     (
@@ -288,10 +256,8 @@ class SpyreAttnBucketer:
                     )
                     for fused_store_ok in (True, False)
                     for rows in row_counts
-                    # Owning the buffer whole from row 0, versus a strict slice.
                     for q_start in (0, 1)
-                    # A sequence cannot start past the buffer it lives in, so a
-                    # one-row batch admits only q_start == 0.
+                    # A sequence cannot start past the buffer it lives in.
                     if q_start < rows
                 }
                 for store_mode, needs_gather in sorted(flag_pairs):

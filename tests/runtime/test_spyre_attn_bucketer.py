@@ -77,8 +77,8 @@ class TestBuckets:
         assert b.kv_buckets == _list_pow2(4096, start=block_size)
 
     def test_kv_buckets_round_non_power_of_two_block_size_up(self):
-        """block_size is only forced to a multiple of 64 by the platform, so a
-        non-power-of-two value is reachable; the buckets stay a clean doubling
+        """The platform only forces block_size to a multiple of 64, so a
+        non-power-of-two value is reachable; buckets stay a clean doubling
         sequence by starting at the next power of two."""
         b = SpyreAttnBucketer(make_config(max_model_len=4096, block_size=192))
         assert b.kv_buckets == [256, 512, 1024, 2048, 4096]
@@ -169,8 +169,7 @@ class TestVariants:
 
     def test_index_without_gather_is_recorded_above_the_decode_bucket(self, bucketer):
         """A single-sequence prefill filling the query buffer exactly needs no
-        gather, yet stores by index because the batch is wider than one row.
-        Reachable, so it must not pay an Inductor compile in the serving path."""
+        gather, yet stores by index since the batch is wider than one row."""
         for bucket in bucketer.query_buckets:
             if bucket == 1:
                 continue
@@ -203,9 +202,8 @@ class TestVariants:
 
     def test_prunes_query_buckets_no_real_query_len_can_reach(self, bucketer):
         """Pruning bounds the *smallest real* query_len that reaches a bucket, not
-        the bucket itself: a padded bucket may exceed the sequence's block span (a
-        2-token query on a 1-block sequence still pads to 512), but a bucket whose
-        whole input range lies past the span is unreachable."""
+        the bucket itself: a 2-token query on a 1-block sequence still legitimately
+        pads to 512."""
         ascending = sorted(bucketer.query_buckets)
         min_real = {b: (ascending[i - 1] + 1 if i else 1) for i, b in enumerate(ascending)}
         for v in bucketer.variants():
@@ -216,9 +214,8 @@ class TestVariants:
     def test_every_rounded_size_lands_on_a_recorded_variant(self, bucketer, kv_len, query_len):
         """The whole point of recording: no runtime batch may miss the cache.
 
-        Drives the two lookups production actually uses -- find_query_bucket for
-        the query axis, and _round_up onto num_blocks_buckets for the block count
-        (what the builder's _pad_num_blocks calls)."""
+        Drives the two lookups production uses -- find_query_bucket, and
+        _round_up onto num_blocks_buckets (what _pad_num_blocks calls)."""
         if query_len > kv_len:
             pytest.skip("a sequence cannot have more new tokens than total KV")
         padded_query_len = bucketer.find_query_bucket(query_len)
@@ -314,8 +311,8 @@ class TestBuilderAttnBucketer:
     def _runner(*group_bucketers):
         """A bare runner whose attention groups hold the given bucketers.
 
-        One argument per group, each a list of per-ubatch bucketers (or Nones for
-        a builder that exposes none).
+        One argument per group, each a list of per-ubatch bucketers (Nones
+        stand in for a builder that exposes none).
         """
         from spyre_inference.v1.worker.spyre_model_runner import TorchSpyreModelRunner
 

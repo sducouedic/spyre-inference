@@ -397,11 +397,10 @@ def _run_spyre_attn_test(
     )
     kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
 
-    # Widened to the recorder's num_blocks buckets, as a real engine's block table
-    # is: build() clamps its KV padding to this width, so a table sized to exactly
-    # what the sequences need would suppress the padding under test. The extra
-    # entries point at arbitrary (garbage) pages on purpose — padded blocks are
-    # fully masked, so they must not affect the result.
+    # Widened to the recorder's num_blocks buckets, as a real engine's block
+    # table is, so build()'s padding isn't suppressed by an exactly-sized table.
+    # The extra entries point at garbage pages on purpose: padded blocks are
+    # fully masked and must not affect the result.
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     from vllm.config import get_current_vllm_config
 
@@ -1855,10 +1854,9 @@ def _padded_mask_metadata(
 ):
     """Build metadata on CPU for a list of (query_len, kv_len) sequences.
 
-    ``max_num_blocks`` sets the block-table width, which build() uses as the
-    ceiling when rounding block counts onto the recorder's buckets. It defaults
-    to what the sequences need, i.e. no headroom; a test that wants padding to
-    actually happen must ask for a wider table, as a real engine's is.
+    ``max_num_blocks`` is the block-table width build() pads onto; it defaults
+    to no headroom, so a test wanting padding to actually happen must pass a
+    wider table, as a real engine's is.
     """
     query_lens = [q for q, _ in seq_lens]
     kv_lens = [kv for _, kv in seq_lens]
@@ -2039,12 +2037,7 @@ def test_attn_fn_cache_key_is_shape_only(default_vllm_config):
 
 
 def _num_blocks_buckets(block_size: int = 64) -> list[int]:
-    """The recorder's num_blocks buckets for the fixture's config.
-
-    Sets ``cache_config.block_size`` for the same reason ``_build_metadata``
-    does: the bucketer derives the buckets from it, so a caller naming a
-    ``block_size`` has to put it where the bucketer reads it.
-    """
+    """The recorder's num_blocks buckets for the fixture's config."""
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()

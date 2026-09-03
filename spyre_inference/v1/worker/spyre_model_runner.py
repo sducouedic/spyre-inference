@@ -718,18 +718,14 @@ class TorchSpyreModelRunner(GPUModelRunner):
             "_spyre_kv_caches is empty: initialize_kv_cache_tensors() must run first."
         )
 
-        # Every layer keeps its own kernel cache, so each one is recorded. Layers
-        # sharing a head configuration trace to the same graph, so only the first
-        # pays a full Inductor compile and the rest hit its cache; a model whose
-        # layers differ (e.g. mixed sliding-window) pays per distinct shape.
+        # Every layer keeps its own kernel cache, so each is recorded separately;
+        # layers sharing a head configuration trace to the same graph and only
+        # the first pays a full Inductor compile.
         static_ctx = self.compilation_config.static_forward_context
         t0 = time.time()
         total = 0
-        # The metadata builders' own bucketer, not a second one built here: every
-        # bucket recorded below is then a bucket build() can actually produce.
-        # Never None here: the KV cache assert above means at least one attention
-        # group exists, and every Spyre backend builds SpyreAttentionMetadataBuilder,
-        # which always sets a bucketer.
+        # The metadata builders' own bucketer, not a second one built here, so
+        # every bucket recorded is one build() can actually produce.
         bucketer = self._resolve_builder_attn_bucketer()
         assert bucketer is not None, "No attention metadata builder exposes a bucketer"
         with _set_spyre_compilation_settings(self.vllm_config):
@@ -750,22 +746,14 @@ class TorchSpyreModelRunner(GPUModelRunner):
     def _resolve_builder_attn_bucketer(self) -> SpyreAttnBucketer | None:
         """The attention bucketer the metadata builders dispatch against.
 
-        Returned rather than constructed so the recorder compiles the very
-        buckets ``build()`` rounds onto: the builder owns the instance, and a
-        second one built here could drift from it, which would make *every*
-        request pad to a block count that was never recorded -- strictly worse
-        than not padding at all.
-
-        A model can have several attention groups (one per backend/kv_cache_spec
-        pair, e.g. mixed sliding-window), and ubatching gives each group several
-        builders. Every one of them derives its buckets from ``cache_config`` and
-        ``model_config`` alone, so they agree by construction; the assert below
-        cannot fire today and is here to catch a future spec-dependent bucket,
-        which would otherwise show up only as an unexplained serving-wide
-        slowdown.
-
-        Returns None when no builder exposes a bucketer, which leaves nothing to
-        record.
+        Returned rather than constructed here, so the recorder compiles exactly
+        the buckets ``build()`` rounds onto -- a second, independently built
+        instance could drift and make every request pad to an unrecorded block
+        count. A model can have several attention groups and, under ubatching,
+        several builders per group; the assert below guards against a future
+        spec-dependent bucket, since today all builders derive buckets from
+        ``cache_config``/``model_config`` alone and so agree by construction.
+        Returns None when no builder exposes a bucketer.
         """
         first: SpyreAttnBucketer | None = None
         for group in self._attn_group_iterator():

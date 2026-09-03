@@ -69,10 +69,9 @@ def kv_cache():
 def _runtime_flag_pairs(bucketer, padded_query_len: int):
     """The (store_mode, needs_gather) pairs a batch at this query bucket can hit.
 
-    Read off the bucketer rather than hardcoded: it derives them from the
-    backend's own resolvers, and tests/runtime/test_spyre_attn_bucketer.py is
-    what checks that derivation against live runtime inputs. "copy" needs a
-    one-row batch, so it only appears at the decode bucket.
+    Read off the bucketer rather than hardcoded, since it derives them from the
+    backend's own resolvers. "copy" needs a one-row batch, so it only appears
+    at the decode bucket.
     """
     pairs = {
         (v.store_mode, v.needs_gather)
@@ -105,10 +104,8 @@ class TestRecordGraphs:
     def test_dispatch_after_recording_does_not_grow_the_cache(self, impl, kv_cache):
         """The acceptance criterion: no request compiles a new variant.
 
-        Rounds the sizes the way production does -- find_query_bucket for the
-        query axis, _round_up onto num_blocks_buckets for the block count -- and
-        resolves the flags through the backend's own resolvers, so a drift in
-        either copy of the rules shows up here.
+        Rounds sizes and resolves flags the way production does, so a drift
+        between the two copies of the rules shows up here.
         """
         bucketer = make_bucketer()
         impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
@@ -154,22 +151,17 @@ class TestRecordGraphs:
     def test_real_metadata_dispatch_does_not_grow_the_cache(self, impl, kv_cache, monkeypatch):
         """The acceptance criterion, driven from real builder metadata.
 
-        ``test_dispatch_after_recording_does_not_grow_the_cache`` asks the
-        bucketer what it would dispatch; this one builds metadata for unbucketed
-        kv_lens through ``SpyreAttentionMetadataBuilder`` and dispatches on the
-        block counts ``build()`` actually produced. Without KV padding, every one
-        of these misses the recorded set and compiles.
+        Unlike ``test_dispatch_after_recording_does_not_grow_the_cache``, this
+        builds metadata for unbucketed kv_lens through
+        ``SpyreAttentionMetadataBuilder`` and dispatches on the block counts
+        ``build()`` actually produced.
         """
         from vllm.config import get_current_vllm_config
 
         from tests.attention.test_spyre_attn import _padded_mask_metadata
 
-        # Built from the live config, not make_bucketer's narrower stand-in: the
-        # metadata below comes from a real SpyreAttentionMetadataBuilder, whose
-        # own bucketer derives from that same config, so the two hold the same
-        # buckets. In production the recorder reads the builder's instance back
-        # (spyre_model_runner._resolve_builder_attn_bucketer) rather than building one;
-        # hand-narrowed buckets here would test a divergence that cannot happen.
+        # Built from the live config, not make_bucketer's narrower stand-in, so
+        # this bucketer and the builder's derive from the same config.
         vllm_config = get_current_vllm_config()
         bucketer = SpyreAttnBucketer(vllm_config)
         impl.record_graphs(torch.device("cpu"), bucketer, kv_cache)
