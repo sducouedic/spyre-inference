@@ -280,7 +280,7 @@ class TestBuilderAttnBucketer:
         first = SpyreAttnBucketer(make_config(max_model_len=2048))
         second = SpyreAttnBucketer(make_config(max_model_len=8192))
         runner = self._runner([first], [second])
-        with pytest.raises(RuntimeError, match="diverge between metadata builders"):
+        with pytest.raises(AssertionError, match="diverge between metadata builders"):
             runner._resolve_builder_attn_bucketer()
 
     def test_skips_builders_without_a_bucketer(self):

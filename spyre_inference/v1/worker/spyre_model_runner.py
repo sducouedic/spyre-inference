@@ -758,8 +758,10 @@ class TorchSpyreModelRunner(GPUModelRunner):
         A model can have several attention groups (one per backend/kv_cache_spec
         pair, e.g. mixed sliding-window), and ubatching gives each group several
         builders. Every one of them derives its buckets from ``cache_config`` and
-        ``model_config`` alone, so they agree by construction; the check below is
-        here to catch a future spec-dependent bucket rather than a live bug.
+        ``model_config`` alone, so they agree by construction; the assert below
+        cannot fire today and is here to catch a future spec-dependent bucket,
+        which would otherwise show up only as an unexplained serving-wide
+        slowdown.
 
         Returns None when no builder exposes a bucketer, which leaves nothing to
         record.
@@ -772,21 +774,19 @@ class TorchSpyreModelRunner(GPUModelRunner):
                     continue
                 if first is None:
                     first = bucketer
-                elif (bucketer.block_size, bucketer.num_blocks_buckets) != (
+                    continue
+                assert (bucketer.block_size, bucketer.num_blocks_buckets) == (
                     first.block_size,
                     first.num_blocks_buckets,
-                ):
-                    # Verify all SpyreAttnBucketer are compatible
-                    raise RuntimeError(
-                        "Attention bucketer buckets diverge between metadata "
-                        f"builders: {type(builder).__name__} has "
-                        f"block_size={bucketer.block_size} "
-                        f"num_blocks={bucketer.num_blocks_buckets}, expected "
-                        f"block_size={first.block_size} "
-                        f"num_blocks={first.num_blocks_buckets}. Only one set can be "
-                        "recorded, so a mismatch means some builder pads onto block "
-                        "counts no kernel was compiled for."
-                    )
+                ), (
+                    "Attention bucketer buckets diverge between metadata builders: "
+                    f"{type(builder).__name__} has block_size={bucketer.block_size} "
+                    f"num_blocks={bucketer.num_blocks_buckets}, expected "
+                    f"block_size={first.block_size} "
+                    f"num_blocks={first.num_blocks_buckets}. Only one set can be "
+                    "recorded, so a mismatch means some builder pads onto block "
+                    "counts no kernel was compiled for."
+                )
         return first
 
     def _determine_batch_execution_and_padding(
