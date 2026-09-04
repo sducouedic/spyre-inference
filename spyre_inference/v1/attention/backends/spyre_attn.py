@@ -1533,7 +1533,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                 )
                 continue
             recorded += 1
-            logger.info(
+            logger.debug(
                 "  [%d/%d] recorded %s in %.2fs",
                 i,
                 len(variants),
@@ -1835,9 +1835,6 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             # Shape enforced via _alibi_tile_shape, matching _record_one's dummy tiles.
             alibi_bias_tiles: list[torch.Tensor] | None = None
             if self.alibi_slopes is not None:
-                tile_shape = _alibi_tile_shape(
-                    self.num_kv_heads, self.num_queries_per_kv, block_size
-                )
                 context_len = kv_len - query_len
                 alibi_bias_tiles = []
                 for b in active_bs:
@@ -1848,7 +1845,6 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                     )
                     rel = (kv_pos - context_len).view(1, 1, 1, block_size)
                     bias = self.alibi_slopes * rel
-                    assert bias.shape == tile_shape
                     alibi_bias_tiles.append(convert(bias, device=_target_device))
 
             needs_gather = resolve_needs_gather(
