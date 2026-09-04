@@ -2100,9 +2100,9 @@ def test_padded_tiles_are_finfo_min_and_prefix_is_unchanged(default_vllm_config)
     )
     assert wide.padded_num_blocks == narrow.padded_num_blocks
     for b in range(real_blocks):
-        assert torch.equal(
-            narrow.attention_mask_tiles[0][b], wide.attention_mask_tiles[0][b]
-        ), f"real block {b} changed"
+        assert torch.equal(narrow.attention_mask_tiles[0][b], wide.attention_mask_tiles[0][b]), (
+            f"real block {b} changed"
+        )
 
 
 def test_zero_kv_len_stays_at_zero_blocks(default_vllm_config):
