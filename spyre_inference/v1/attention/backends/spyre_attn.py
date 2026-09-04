@@ -588,11 +588,6 @@ class SpyreAttentionMetadata(AttentionMetadata):
     # kernel compilation.
     aligned_max_query_len: int = 0
 
-    # Width of the mask the tiles were sliced from: max(padded_num_blocks) *
-    # block_size. 0 on the sliding-window path, which never forms a full-width
-    # mask.
-    aligned_max_seq_len: int = 0
-
     # Per-sequence padded active-block count, rounded up onto the recorder's
     # buckets; equals len(attention_mask_tiles[s]). None on the sliding-window
     # path, which is left unpadded (see build()).
@@ -999,9 +994,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
 
         padded_num_blocks: list[int] | None = None
         real_num_blocks: list[int] = []
-        # Width of the mask the tiles are sliced from; the sliding-window
-        # branch forms no full-width mask and leaves this 0.
-        aligned_max_seq_len = 0
 
         if self.sliding_window is None:
             # seq_lens itself is NOT padded: it feeds the mask's kv_valid cutoff,
@@ -1015,7 +1007,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # The mask's KV width must cover every block forward() will
             # iterate, i.e. the padded block extent.
             mask_kv_width = max(padded_num_blocks) * block_size
-            aligned_max_seq_len = mask_kv_width
 
             # Build the full additive mask and split it into per-block tiles.
             # Padded tiles need no special construction — kv_valid = kv_pos <
@@ -1155,7 +1146,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             active_block_indices=active_block_indices,
             page_index_table_cpu=page_index_table_cpu,
             aligned_max_query_len=aligned_max_query_len,
-            aligned_max_seq_len=aligned_max_seq_len,
             padded_num_blocks=padded_num_blocks,
             bucket_num_seqs=bucket_num_seqs,
             bucket_num_blocks=bucket_num_blocks,
