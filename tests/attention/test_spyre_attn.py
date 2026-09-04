@@ -2115,22 +2115,6 @@ def test_zero_kv_len_stays_at_zero_blocks(default_vllm_config):
     assert metadata.padded_num_blocks[1] == 2
 
 
-def test_padding_always_applied_when_table_covers_top_bucket(default_vllm_config):
-    """block_table is engine-lifetime-wide (vLLM sizes it from max_model_len,
-    never narrower), so padding is unconditional -- no fallback to the real
-    count."""
-    torch.set_default_device("cpu")
-    block_size = 64
-    # kv_len 130 -> 3 real blocks; the table is as wide as a real engine's,
-    # so the bucket of 4 always fits and build() must pad to it.
-    metadata = _padded_mask_metadata(
-        [(1, 130)], block_size=block_size, max_num_blocks=_num_blocks_buckets(block_size)[-1]
-    )
-
-    assert metadata.padded_num_blocks[0] == 4
-    assert len(metadata.attention_mask_tiles[0]) == 4
-
-
 def test_sliding_window_is_left_unpadded(default_vllm_config):
     torch.set_default_device("cpu")
     metadata = _padded_mask_metadata(

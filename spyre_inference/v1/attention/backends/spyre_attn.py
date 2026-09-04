@@ -1319,6 +1319,14 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # has_alibi and logits_soft_cap don't need to be part of the cache key.
         key = (num_blocks, padded_query_len, store_mode, needs_gather)
         if key not in self._attn_fns:
+            logger.info(
+                "Compiling attention for shape (num_blocks=%d, padded_query_len=%d, "
+                "store_mode=%s, needs_gather=%s)",
+                num_blocks,
+                padded_query_len,
+                store_mode,
+                needs_gather,
+            )
             self._attn_fns[key] = _maybe_compile(
                 _create_compilable_page_attn(
                     num_blocks,
