@@ -700,7 +700,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
         self._record_attention_graphs(bucket_sizes)
 
     def _record_attention_graphs(self, token_counts: list[int]) -> None:
-        """Pre-compile the attention and reshape_and_cache kernels.
+        """Pre-compile the attention.
 
         The model-level warmup above cannot cover these: ``_dummy_run`` delegates
         upstream, which passes ``attn_metadata=None``, so ``forward`` returns
@@ -736,7 +736,6 @@ class TorchSpyreModelRunner(GPUModelRunner):
                     continue
                 logger.info("Recording attention graphs for layer %s...", layer_name)
                 total += impl.record_graphs(self._spyre_device, bucketer, kv_cache)
-                total += impl.record_kv_update_graphs(self._spyre_device, token_counts, kv_cache)
         logger.info(
             "Attention graph recording complete: %d graphs in %.3fs.",
             total,

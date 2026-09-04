@@ -219,20 +219,6 @@ class TestRecordGraphs:
         assert bucketer.variants()[0].key not in impl._attn_fns
 
 
-class TestRecordKvUpdateGraphs:
-    def test_records_each_token_count(self, impl, kv_cache):
-        recorded = impl.record_kv_update_graphs(torch.device("cpu"), [4, 8, 8, 16], kv_cache)
-        assert recorded == 3
-
-    def test_skips_counts_beyond_the_slot_capacity(self, impl, kv_cache):
-        num_slots = NUM_PAGES * BLOCK_SIZE
-        assert impl.record_kv_update_graphs(torch.device("cpu"), [num_slots + 1], kv_cache) == 0
-
-    def test_eager_records_nothing(self, impl, kv_cache):
-        impl._compile_attn = False
-        assert impl.record_kv_update_graphs(torch.device("cpu"), [8], kv_cache) == 0
-
-
 class TestRecompileLimit:
     def test_limit_is_raised_during_recording_and_restored(self, impl, kv_cache):
         """Dynamo's accumulated limit is global, so more buckets than it allows would

@@ -1630,56 +1630,6 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             out=out,
         )
 
-    def record_kv_update_graphs(
-        self,
-        device: torch.device,
-        token_counts: list[int],
-        kv_cache: SpyrePagedKVCache,
-    ) -> int:
-        """Pre-compile ``_reshape_fn`` for each distinct token count.
-
-        ``reshape_and_cache`` specializes on the token count like the attention
-        kernels do, so it stalls serving the same way if left lazy.
-
-        This writes zeros into the low slots of the real cache. Harmless: warmup
-        runs right after ``initialize_kv_cache_tensors`` allocated it zeroed, and
-        before any request has claimed a block.
-        """
-        if not self._compile_attn:
-            return 0
-
-        k_pages, _ = kv_cache
-        num_slots = k_pages.shape[0] * k_pages.shape[1]
-        recorded = 0
-        for num_tokens in sorted(set(token_counts), reverse=True):
-            if num_tokens > num_slots:
-                continue
-            t0 = time.time()
-            key = convert(
-                torch.zeros(num_tokens, self.num_kv_heads, self.head_size, dtype=self.model_dtype),
-                device=device,
-            )
-            value = convert(
-                torch.zeros(num_tokens, self.num_kv_heads, self.head_size, dtype=self.model_dtype),
-                device=device,
-            )
-            slots = convert(torch.arange(num_tokens, dtype=torch.int32), device=device)
-            try:
-                self.do_kv_cache_update(None, key, value, kv_cache, slots)
-            except Exception:
-                logger.warning(
-                    "reshape_and_cache failed to record for %d tokens; it will "
-                    "compile on first use instead.",
-                    num_tokens,
-                    exc_info=True,
-                )
-                continue
-            recorded += 1
-            logger.info(
-                "  reshape_and_cache recorded for %d tokens in %.2fs", num_tokens, time.time() - t0
-            )
-        return recorded
-
     def kv_slot_views(self, kv_cache: SpyrePagedKVCache) -> SpyrePagedKVCache:
         """Slot-major views of the pages, built once outside any graph.
 
