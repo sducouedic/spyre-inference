@@ -325,7 +325,7 @@ class TestEncoderBuckets:
             max_num_seqs=4,
             max_model_len=2048,
             max_num_batched_tokens=300,
-            len_bucket_override=[64, 256],
+            len_bucket=[64, 256],
         ) == [(1, 64), (1, 256), (2, 64), (4, 64)]
 
     def test_expand_packed_to_encoder_bucket_pads_seq_and_batch(self):

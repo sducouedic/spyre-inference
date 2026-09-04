@@ -152,12 +152,12 @@ def pooling_warmup_shapes(
     max_num_seqs: int,
     max_model_len: int,
     max_num_batched_tokens: int,
-    len_bucket_override: Sequence[int] | None = None,
+    len_bucket: Sequence[int] | None = None,
 ) -> list[tuple[int, int]]:
     """``(batch_size, prompt_len)`` pairs to dummy at serve start."""
     shapes: list[tuple[int, int]] = []
     for batch_size in batch_buckets(max_num_seqs):
-        for prompt_len in len_buckets(max_model_len, len_bucket_override):
+        for prompt_len in len_buckets(max_model_len, len_bucket):
             if prompt_len > max_model_len:
                 continue
             if batch_size * prompt_len > max_num_batched_tokens:
@@ -302,7 +302,7 @@ class SpyreShapeBucketer:
             max_num_seqs=scheduler.max_num_seqs,
             max_model_len=model_config.max_model_len,
             max_num_batched_tokens=scheduler.max_num_batched_tokens,
-            len_bucket_override=default_encoder_len_buckets(model_config.max_model_len),
+            len_bucket=default_encoder_len_buckets(model_config.max_model_len),
         )
         if not shapes and not compile_sizes:
             return None
