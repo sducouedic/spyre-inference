@@ -1047,6 +1047,10 @@ def test_block_size_validation():
             cache_config=cache_config,
             compilation_config=compilation_config,
         )
+        # The platform's own check_and_update_config already rounds an invalid
+        # block_size up to a multiple of 64 during VllmConfig construction, so
+        # restore the invalid value here to exercise the builder's own check.
+        vllm_config.cache_config.block_size = block_size
         kv_cache_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=2,
@@ -1927,8 +1931,10 @@ def test_padded_mask_rows_equal_last_real_row(default_vllm_config, seq_lens):
         pytest.param([(7, 256)], id="prefill_q7"),
         pytest.param([(1, 320)], id="decode_q1"),
         pytest.param([(40, 512)], id="prefill_q40"),
-        # Unbucketed kv_lens, so build() appends fully-masked padded blocks:
-        # 65 -> 2 real blocks padded to 4, 300 -> 5 to 8, 513 -> 9 to 16.
+        # Unbucketed kv_lens, so build() appends fully-masked padded blocks
+        # (given a table with headroom -- see max_num_blocks above): 65 -> 2
+        # real blocks, already a bucket; 300 -> 5 real padded to 8; 513 -> 9
+        # real padded to 16.
         pytest.param([(7, 65)], id="prefill_q7_padded_blocks"),
         pytest.param([(1, 300)], id="decode_q1_padded_blocks"),
         pytest.param([(40, 513)], id="prefill_q40_padded_blocks"),
@@ -1937,7 +1943,7 @@ def test_padded_mask_rows_equal_last_real_row(default_vllm_config, seq_lens):
 def test_padded_mask_rows_are_not_fully_masked(default_vllm_config, seq_lens):
     """No mask row is fully masked: attn = tile_output / tile_sum would be NaN."""
     torch.set_default_device("cpu")
-    metadata = _padded_mask_metadata(seq_lens)
+    metadata = _padded_mask_metadata(seq_lens, max_num_blocks=_num_blocks_buckets()[-1])
     mask = _seq_mask(metadata, 0)
     mask_min = torch.finfo(torch.float16).min
 
@@ -2048,7 +2054,7 @@ def _num_blocks_buckets(block_size: int = 64) -> list[int]:
 @pytest.mark.parametrize(
     ("kv_len", "expected"),
     [
-        pytest.param(65, 4, id="kv65_to_4"),
+        pytest.param(65, 2, id="kv65_to_2"),
         pytest.param(300, 8, id="kv300_to_8"),
         pytest.param(256, 4, id="kv256_exact_noop"),
         pytest.param(1025, 32, id="kv1025_to_32"),
@@ -2067,31 +2073,35 @@ def test_padded_num_blocks_lands_on_a_bucket(default_vllm_config, kv_len, expect
 
 
 def test_padded_tiles_are_finfo_min_and_prefix_is_unchanged(default_vllm_config):
-    """Padded blocks are exactly finfo.min; the real prefix is bit-identical."""
+    """Padded blocks are exactly finfo.min; the real prefix is bit-identical
+    regardless of how much headroom the block table has beyond the bucket
+    build() actually pads to -- build() always pads to a bucket (no unpadded
+    fallback), so both tables here must have at least that much headroom."""
     torch.set_default_device("cpu")
     block_size = 64
     kv_len, query_len = 300, 32
     real_blocks = (kv_len + block_size - 1) // block_size
+    buckets = _num_blocks_buckets()
 
-    padded = _padded_mask_metadata(
-        [(query_len, kv_len)], block_size=block_size, max_num_blocks=_num_blocks_buckets()[-1]
+    narrow = _padded_mask_metadata(
+        [(query_len, kv_len)], block_size=block_size, max_num_blocks=buckets[-1]
     )
-    assert padded.padded_num_blocks[0] > real_blocks
+    assert narrow.padded_num_blocks[0] > real_blocks
 
     mask_min = torch.finfo(torch.float16).min
-    for b in range(real_blocks, padded.padded_num_blocks[0]):
-        tile = padded.attention_mask_tiles[0][b]
+    for b in range(real_blocks, narrow.padded_num_blocks[0]):
+        tile = narrow.attention_mask_tiles[0][b]
         assert torch.equal(tile, torch.full_like(tile, mask_min)), f"block {b} is not finfo.min"
 
-    # The real prefix must be bit-identical to the same build with padding
-    # suppressed (a block table only as wide as the sequence needs).
-    unpadded = _padded_mask_metadata(
-        [(query_len, kv_len)], block_size=block_size, max_num_blocks=real_blocks
+    # The real prefix must be bit-identical regardless of extra table
+    # headroom past the bucket build() actually uses.
+    wide = _padded_mask_metadata(
+        [(query_len, kv_len)], block_size=block_size, max_num_blocks=buckets[-1] * 2
     )
-    assert unpadded.padded_num_blocks == [real_blocks]
+    assert wide.padded_num_blocks == narrow.padded_num_blocks
     for b in range(real_blocks):
         assert torch.equal(
-            padded.attention_mask_tiles[0][b], unpadded.attention_mask_tiles[0][b]
+            narrow.attention_mask_tiles[0][b], wide.attention_mask_tiles[0][b]
         ), f"real block {b} changed"
 
 
@@ -2102,7 +2112,7 @@ def test_zero_kv_len_stays_at_zero_blocks(default_vllm_config):
 
     assert metadata.padded_num_blocks[0] == 0
     assert metadata.attention_mask_tiles[0] == []
-    assert metadata.padded_num_blocks[1] == 4
+    assert metadata.padded_num_blocks[1] == 2
 
 
 def test_padding_always_applied_when_table_covers_top_bucket(default_vllm_config):
@@ -2127,18 +2137,3 @@ def test_sliding_window_is_left_unpadded(default_vllm_config):
         [(7, 300)], block_size=64, sliding_window=128, max_num_blocks=_num_blocks_buckets()[-1]
     )
     assert metadata.padded_num_blocks is None
-
-
-def test_bucketed_decode_uses_real_block_counts(default_vllm_config, enable_bucketed_decode):
-    """KV padding must not inflate the bucketed-decode block bucket."""
-    torch.set_default_device("cpu")
-    block_size = 64
-    # kv_len 65 is 2 real blocks (decode bucket 2) padded to 4 (bucket 4), so the
-    # two counts disagree here.
-    seqs = [(1, 65)] * 4
-    metadata = _padded_mask_metadata(
-        seqs, block_size=block_size, max_num_blocks=_num_blocks_buckets(block_size)[-1]
-    )
-
-    assert metadata.padded_num_blocks == [4] * len(seqs)
-    assert metadata.bucket_num_blocks == 2
