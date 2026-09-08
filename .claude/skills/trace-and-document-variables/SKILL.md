@@ -36,7 +36,11 @@ Read the target file(s) in full before touching anything. Identify:
 
 - **Base configs** (per above) — list them; they anchor the top of the sheet as a compact strip.
 - **Branch points**: `if`/dispatch logic that picks between code paths (bucketed vs per-seq, prefill vs decode, sliding-window vs not). Each reachable branch is one scenario/tab.
-- **Capture points** for the traced variables: for each function in scope, the places whose locals actually explain how the data is structured and how those structures relate — usually right after inputs arrive, around a reshape/gather/scatter or a dict/object being assembled or unpacked, and right before dispatching into a compiled kernel. 1-3 per simple function; a branchier one needs more. Skip variables trivially derived from ones already captured, or unchanged since the last point. A print flood is as useless to future-you as too few prints.
+- **Capture points** for the traced variables: **capture broadly — err heavily on the side of more.** Capturing a variable is nearly free (it's an env-gated print, reverted in step 5), while a missing one is expensive: you only find out after the run, and getting it means re-instrumenting and re-driving the scope. So sweep every function in scope: every local that holds a tensor, container, object or structurally meaningful scalar, at every point its structure changes — inputs as they arrive, each reshape/gather/scatter, each dict/object assembled or unpacked, each branch taken, and the state right before dispatching into a compiled kernel. Prefer re-printing a variable at a later point over assuming it's unchanged; a variable you thought was derivable often isn't, and cheap redundancy in the log beats a second run. The only genuine limits are stdout volume across *steps* (handled by the step range, step 4) and truncating giant previews — not the number of variables.
+
+- **Flaws, surprises and sharp edges** are a first-class output, not a side effect. While reading the logs, keep a running note of anything that looks wrong or merely surprising: a padded region holding live values instead of zeros/sentinels, an off-by-one in a length or offset, a tensor whose dtype/device disagrees with its neighbours, a field that is `None` where the code clearly expects it, a shape that only works because two constants happen to be equal, a branch that fires when it shouldn't, a `FallbackWarning`. Do **not** fix these and do **not** chase them — capture the evidence and record it (see "Flagging discovered flaws" in step 6). A wide capture surfaces these for free, which is a large part of why it is worth doing.
+
+  Selectivity belongs in the **rendering**, not the capture. Everything captured lands in the log; step 6 then decides what earns a full glossed row, what collapses into a compact row, and what is merely mentioned — see "Ranking a wide capture" there. Capture wide, render ranked.
 
 ### 2. One end-to-end run to pin the base configs
 
@@ -146,16 +150,52 @@ Structure:
 1. **Masthead** — scope covered, the exact command/config used, model/dtype.
 2. **Legend** — the color key, once, small.
 3. **Base config strip** — a compact grid of the fixed values from step 2. One glance re-anchors the mental model. Values only; a derived one may carry a few words (`num_queries_per_kv = 32/8 — GQA group size`).
-4. **One tab per scenario/code path** (see below) — each tab headed by its few-word description and run facts — each holding one collapsible `<details>` per function, each holding a `<div class="vrow">` per variable. Every row is **name + few-word gloss**, then structure chips, then a value preview. Which chips depends on the kind — one row layout, kind-appropriate chips:
+4. **Discovered-flaw band** — if and only if the run surfaced something (see "Flagging discovered flaws"), a red/orange rectangle per finding, directly above the tab bar for run-wide findings. Omit the band entirely on a clean run.
+5. **One tab per scenario/code path** (see below) — each tab headed by its few-word description and run facts — each holding one collapsible `<details>` per function, each holding a `<div class="vrow">` per variable. Every row is **name + few-word gloss**, then structure chips, then a value preview. Which chips depends on the kind — one row layout, kind-appropriate chips:
    - tensor: shape → dtype → device → value preview
    - dict: `len` → key list (keys as chips), one indented sub-row per interesting value
    - list/tuple: `len` → element kind → preview (mark ragged lengths explicitly)
    - dataclass/object: type name → one indented sub-row per field, `None` fields greyed like padding
    - scalar/flag: type → value
    Nest sub-rows at most two levels deep; below that, summarize.
-5. **Footer** — one line: env-gated prints, since reverted; line numbers refer to the clean file.
+6. **Footer** — one line: env-gated prints, since reverted; line numbers refer to the clean file.
 
 **Scenarios go in tabs, not stacked sections** — one tab bar, one panel per scenario, first active on load, so switching between prefill and decode is a click rather than a scroll and the same variable sits in the same screen position across paths. Copy the `.tabs-bar` / `.tab-panel` CSS, the `<button onclick="switchTab('<name>', this)">` markup and the `switchTab` function from the example; the button names and the `tab-<name>` panel ids have to agree. The base-config strip stays **above** the bar, since it holds for every scenario.
+
+#### Flagging discovered flaws
+
+When a run surfaces a genuine bug, caveat, red flag or danger, the sheet says so **loudly** — a bordered red or orange rectangle, not a grey `.note`. The reasoning: the user opens this file mid-debugging, and a flaw the run already proved is the highest-value thing on the page. Burying it in a one-line gloss wastes the discovery, and they will re-derive it painfully later.
+
+Two tiers, distinguished by colour:
+
+- **`.flag` (red, badge `BUG`)** — the captured values show something is actually wrong: padding holding live data, an off-by-one, a dtype/device mismatch, a `None` the code dereferences, a branch firing when it shouldn't, a `FallbackWarning` on a hot path.
+- **`.flag.caveat` (orange, badge `CAVEAT`)** — not a bug, but a sharp edge that will bite: an invariant holding only by coincidence, one tensor unpadded while its neighbours are bucketed, a silent clamp, a shape that works only for this config.
+
+Each rectangle carries, in this order: the **badge**, a **one-line title** naming the flaw, the **location** (`file:line · tab`) right-aligned, one or two lines of what goes wrong and why it matters, and — the part that makes it trustworthy — a **`.ev` evidence block quoting the actual `### DBG[...]` lines** that show it. Copy the `.flag` markup and the `--flaw` / `--caveat` token triples from `reference/example-cheatsheet.html`; both worked examples are there.
+
+Placement follows scope: a finding that holds across the run goes **above the tab bar**; one specific to a code path goes at the **top of that tab**; when a single variable's value *is* the evidence, additionally mark its row with `.vrow.flagged` (or a `.flagmark` ⚠ next to the name) so the rectangle and the row it refers to are visually linked.
+
+Rules that keep this signal meaningful:
+
+- **Only from captured evidence.** Same rule as everything else in the sheet — if a run didn't demonstrate it, it is not a flaw, it is a hypothesis, and it stays out. A suspicion worth voicing goes to the user in chat, not into a rectangle.
+- **Omit the band on a clean run.** No "no issues found" placeholder — an empty flag area trains the user to ignore the colour. Say it in chat instead.
+- **Don't fix what you find.** This skill documents; it does not repair. Report the flaw in the sheet, mention it to the user, and let them decide. A fix would also invalidate the very capture the sheet is built from.
+- **Keep it scarce.** More than a handful of red rectangles and the colour stops meaning anything — promote the ones the evidence really proves, and demote the rest to caveats or to ordinary `.note` lines.
+- **Unreached branches are not flaws.** A branch that wouldn't fire (step 3) is reported as unreached in the masthead or in chat, not as a bug — unless the capture positively shows why it can't fire.
+
+Also tell the user, in chat, about every flag in the sheet — they may want to act on it now, and the sheet is a reference, not a notification.
+
+#### Ranking a wide capture
+
+Step 1 captures wide, so a log holds more variables than a scannable sheet can give equal weight to. **Render all of them — drop nothing that was captured — but rank them**, so the eye lands on the structures that carry the logic and the rest stays available without competing for attention. Three tiers:
+
+- **Featured** — the variables the scope exists to explain: the padded/bucketed tensors, the ones whose shape changes across the branch, the dict or metadata object whose key set moves. Full treatment: inline gloss, all structure chips, colored value preview, ratio bar, note where one is earned.
+- **Compact** — real but supporting: intermediates, unchanged re-prints, scalars that merely confirm a count. One line, chips only, gloss only where the name isn't self-evident. A tighter row class (smaller type, no preview or a truncated one) is the right rendering.
+- **Folded** — bulk that belongs in the record but not on screen: long unchanging lists, deep nesting, a variable repeated identically at several points. Put these behind a nested `<details>` inside the function block, summarized by count (`+11 unchanged intermediates`).
+
+A variable's tier can differ per scenario tab — the same tensor may be featured on the prefill path and compact on decode. Rank per tab, not once globally.
+
+If a function's rows all look equally important, that is a sign the ranking hasn't been done, not that the function is uniformly interesting.
 
 #### Word budget
 
@@ -189,12 +229,15 @@ Every scenario/tab carries a **tiny high-level description** of what the case *i
 - Don't strip the sheet down to bare notation either — an unlabelled `(64, 4, 1, 128)` costs the user the same re-derivation the sheet exists to prevent. Gloss it.
 - Don't leave a scenario tab unlabelled — every tab says in a few words what the case is (see "Scenario descriptions").
 - Don't invent or extrapolate structures or values "because they're plausible" — every number traces back to a captured `### DBG[...]` block.
+- Don't invent a flaw, or promote a hunch to a red rectangle — a flag needs captured evidence quoted beside it, and a clean run gets no flag band at all (not a "no issues found" box).
+- Don't fix a bug you discover mid-capture. Flag it, tell the user, leave the code alone — a fix invalidates the capture the sheet is built from.
 - Don't pick base configs yourself — harvest them from the user's own end-to-end run (step 2).
 - Don't pre-flight hardware/imports/device setup before the first run — trust the user's scenario and run it. If it fails, report the failure and stop; don't debug the environment.
 - Don't rerun end-to-end once per branch; patch and drive the scope locally instead (step 3).
-- Don't instrument every line — capture the points that explain how the structures relate, skipping trivial or unchanged variables.
+- Don't be stingy with capture points — under-capturing costs a whole re-run, so print every structurally meaningful local wherever its structure changes. Trim in the HTML (rank rows), not in the instrumentation.
 - Don't restrict the sheet to tensors. A dict whose key set changes per branch, a metadata object with half its fields `None`, or a bucket-size scalar all belong in it — tensors get the most notation, not exclusive coverage.
 - Don't dump a container in full. Keys/fields/length plus a bounded per-value summary, two levels deep at most.
+- Don't render a wide capture as one flat wall of equal-weight rows — tier it (featured / compact / folded) so the important structures stand out. Breadth in the log must not become noise in the sheet.
 - Don't leave debug prints in the source file after capture — always revert (step 5).
 - Don't stack scenarios as long scrolling sections — use the tab bar.
 - Don't paste multi-fact callouts as one paragraph — one `<li>` per fact.

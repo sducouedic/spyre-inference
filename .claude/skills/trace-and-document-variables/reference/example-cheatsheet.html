@@ -6,6 +6,8 @@
   --mono-bg:#0d0d14; --mono-surface:#171622; --mono-border:#2c2a3d;
   --head:#2f8f7d; --kv:#b8860f; --seq:#7457c9; --pad:#8b8898; --pad-bg:#e4e2ee;
   --neg:#c94f4f; --neg-bg:#fbeaea; --zero:#2f8f7d; --zero-bg:#e9f5f1;
+  --flaw:#d13b3b; --flaw-bg:#fdeceb; --flaw-edge:#f0b4b0;
+  --caveat:#c2760c; --caveat-bg:#fdf3e2; --caveat-edge:#eccb92;
   --tag-bucket:#7457c9; --tag-loop:#2f6f9e; --tag-mask:#b8860f;
   --code-text:#e4e1f0; --code-dim:#8f8ba8;
 }
@@ -17,6 +19,8 @@
     --mono-bg:#0a0910; --mono-surface:#171525; --mono-border:#332f47;
     --head:#5fc7ae; --kv:#e0b23f; --seq:#a892e8; --pad:#726d8a; --pad-bg:#242138;
     --neg:#e2837f; --neg-bg:#3a2226; --zero:#5fc7ae; --zero-bg:#1c2e2a;
+    --flaw:#f08b84; --flaw-bg:#3b1f21; --flaw-edge:#7d3b3b;
+    --caveat:#e8b866; --caveat-bg:#33280f; --caveat-edge:#7a5f24;
     --tag-bucket:#a892e8; --tag-loop:#6fa8d8; --tag-mask:#e0b23f;
     --code-text:#e4e1f0; --code-dim:#8f8ba8;
   }
@@ -27,6 +31,8 @@
   --mono-bg:#0a0910; --mono-surface:#171525; --mono-border:#332f47;
   --head:#5fc7ae; --kv:#e0b23f; --seq:#a892e8; --pad:#726d8a; --pad-bg:#242138;
   --neg:#e2837f; --neg-bg:#3a2226; --zero:#5fc7ae; --zero-bg:#1c2e2a;
+  --flaw:#f08b84; --flaw-bg:#3b1f21; --flaw-edge:#7d3b3b;
+  --caveat:#e8b866; --caveat-bg:#33280f; --caveat-edge:#7a5f24;
   --tag-bucket:#a892e8; --tag-loop:#6fa8d8; --tag-mask:#e0b23f;
   --code-text:#e4e1f0; --code-dim:#8f8ba8;
 }
@@ -153,6 +159,40 @@ details.fn > summary .loc{font-weight:400; color:var(--text-faint); font-size:11
 .callout ul{margin:0; padding-left:18px;}
 .callout li{margin:2px 0;}
 
+/* discovered flaws: a full rectangle, not a left rule, so it reads as an interrupt */
+.flag{
+  font-size:12.5px; color:var(--text); background:var(--flaw-bg);
+  border:1.5px solid var(--flaw-edge); border-left:5px solid var(--flaw);
+  border-radius:6px; padding:9px 12px; margin:8px 0 14px;
+}
+.flag.caveat{ background:var(--caveat-bg); border-color:var(--caveat-edge); border-left-color:var(--caveat); }
+.flag .hdr{
+  display:flex; align-items:baseline; gap:8px; font-family:system-ui,sans-serif;
+  font-weight:700; color:var(--flaw); margin-bottom:4px;
+}
+.flag.caveat .hdr{ color:var(--caveat); }
+.flag .badge{
+  font-size:9.5px; letter-spacing:.09em; text-transform:uppercase; font-weight:800;
+  color:var(--flaw-bg); background:var(--flaw); border-radius:3px; padding:2px 6px; flex:none;
+}
+.flag.caveat .badge{ color:var(--caveat-bg); background:var(--caveat); }
+.flag .where{
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  font-size:11px; font-weight:400; color:var(--text-dim); margin-left:auto; flex:none;
+}
+.flag .ev{
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  font-size:11px; color:var(--code-text); background:var(--mono-surface);
+  border:1px solid var(--mono-border); border-radius:4px;
+  padding:5px 8px; margin-top:6px; overflow-x:auto; white-space:pre;
+}
+.flag ul{margin:4px 0 0; padding-left:18px;}
+/* inline marker on a variable row whose value is the evidence */
+.vrow.flagged{ background:var(--flaw-bg); border-radius:5px; box-shadow:inset 3px 0 0 var(--flaw); padding-left:9px; }
+.vrow.flagged.caveat{ background:var(--caveat-bg); box-shadow:inset 3px 0 0 var(--caveat); }
+.flagmark{ color:var(--flaw); font-weight:800; cursor:help; }
+.flagmark.caveat{ color:var(--caveat); }
+
 /* diagram-ish shape bars */
 .bar{display:flex; height:18px; border-radius:4px; overflow:hidden; margin-top:6px; border:1px solid var(--mono-border);}
 .bar span{display:block; height:100%;}
@@ -203,6 +243,8 @@ a:focus-visible, summary:focus-visible{outline:2px solid var(--seq); outline-off
     <div class="grp"><span class="swatch" style="background:var(--zero)"></span>valid / 0.0</div>
     <div class="grp"><span class="swatch" style="background:var(--pad)"></span>padding</div>
     <div class="grp"><span class="swatch" style="background:var(--neg)"></span>−65504 (fp16 min, masked)</div>
+    <div class="grp"><span class="swatch" style="background:var(--flaw)"></span>flaw found in this run</div>
+    <div class="grp"><span class="swatch" style="background:var(--caveat)"></span>caveat / sharp edge</div>
   </div>
 
 
@@ -228,6 +270,33 @@ a:focus-visible, summary:focus-visible{outline:2px solid var(--seq); outline-off
       <li><b>−65504.0 = torch.finfo(float16).min</b> — additive mask fill, in place of −inf.</li>
       <li><b>_num_seqs_buckets = (1,2,4,8)</b>, <b>_num_blocks_buckets = (1,2,4,8,16)</b> — powers of 2 up to the cap.</li>
     </ul>
+  </div>
+
+  <!-- Discovered-flaw rectangle. Only present when a run actually surfaced something;
+       omit the block entirely on a clean run rather than inventing a finding. -->
+  <div class="flag">
+    <div class="hdr">
+      <span class="badge">bug</span>
+      Padding rows carry live KV, not zeros
+      <span class="where">spyre_attn.py:412 · tab 3</span>
+    </div>
+    Bucket padding clamps <code>block_table</code> to the <i>last valid</i> block instead of a null block, so
+    the 3 padding rows attend to real KV from seq 4. Harmless only because the rows are sliced off at the end —
+    any downstream consumer reading the full bucket sees garbage.
+    <div class="ev">### DBG[bucketed_decode.block_table]
+  block_table: Tensor shape=(8, 16) dtype=int32
+    preview=[[0,1,2,...], ..., [44,45,46,...], [44,45,46,...]]
+                                 ^ row 5-7 duplicate row 4</div>
+  </div>
+
+  <div class="flag caveat">
+    <div class="hdr">
+      <span class="badge">caveat</span>
+      <code>seq_lens</code> is unpadded while every other tensor is bucketed
+      <span class="where">spyre_attn.py:388 · tabs 2, 3</span>
+    </div>
+    Length 5, not 8 — the one tensor in the bucketed path that keeps the real batch size. Easy to index in lockstep
+    with the padded tensors and read out of bounds.
   </div>
 
   <div class="tabs-bar">
