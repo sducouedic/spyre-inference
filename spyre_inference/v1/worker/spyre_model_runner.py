@@ -38,6 +38,7 @@ the CPU fallbacks will be obsolete and most operations will be performed on Spyr
 
 from __future__ import annotations
 
+import bisect
 import time
 from contextlib import contextmanager
 from typing import cast
@@ -45,6 +46,7 @@ from typing import cast
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils._pytree import tree_map
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
@@ -54,6 +56,7 @@ from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -61,6 +64,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
 )
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.cpu_model_runner import _torch_cuda_wrapper
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -79,18 +83,26 @@ from spyre_inference.custom_ops.mlp_pad import (
 )
 from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
+from spyre_inference.v1.attention.backends.spyre_attn import (
+    SpyreAttentionImpl,
+    SpyrePagedKVCache,
+    allocate_staging_buffers,
+    mark_warmup_complete,
+)
+from spyre_inference.v1.attention.spyre_attn_bucketer import SpyreAttnBucketer
 from spyre_inference.v1.pool import (
-    TOKEN_POOLING_TASKS,
     configure_pooling_for_spyre,
     copy_pooler_output_to_cpu,
     select_rows,
 )
-from spyre_inference.v1.worker.spyre_shape_bucketer import SpyreShapeBucketer
+from spyre_inference.v1.worker.spyre_shape_bucketer import (
+    SpyreShapeBucketer,
+    logits_row_buckets,
+    pooling_warmup_shapes,
+)
 
 logger = init_logger(__name__)
 
-# Eager pooling warmup: one short sequence so the dummy stays compile-cheap.
-SPYRE_ENCODER_WARMUP_MAX_TOKENS = 16
 
 # Pure-PyTorch replacement for torch.ops._C.compute_slot_mapping_kernel_impl
 # (unavailable with VLLM_TARGET_DEVICE=empty).
@@ -290,11 +302,13 @@ class _SpyreModelWrapper:
         model: nn.Module,
         spyre_device: torch.device,
         keep_outputs_on_device: bool = False,
+        logits_row_buckets: list[int] | None = None,
     ):
         # Use object.__setattr__ to avoid triggering __setattr__ override
         object.__setattr__(self, "_model", model)
         object.__setattr__(self, "_spyre_device", spyre_device)
         object.__setattr__(self, "_keep_outputs_on_device", keep_outputs_on_device)
+        object.__setattr__(self, "_logits_row_buckets", logits_row_buckets or [])
 
     def __call__(self, *args, **kwargs):
         # Convert integer tensor inputs to Spyre int64
@@ -337,15 +351,30 @@ class _SpyreModelWrapper:
         """Move hidden_states onto Spyre for the lm_head custom op.
 
         gpu_model_runner.execute_model slices `hidden_states[logits_indices]`
-        on CPU (Spyre cannot slice), so the tensor handed to compute_logits
-        is on CPU; move it onto Spyre for the lm_head matmul. The logits are
+        on CPU (no Spyre `aten::index.Tensor`; a device gather needs
+        `select_rows`), so the tensor handed to compute_logits is on CPU;
+        move it onto Spyre for the lm_head matmul. The logits are
         returned on CPU: SpyreParallelLMHead.forward_oot keeps them on Spyre
         for the TP all_gather, and SpyreLogitsProcessor._gather_logits
         converts back to CPU right after the gather (before the vocab slice
         and scale), so downstream sampling gets CPU logits.
+
+        The sampled-row count is not body-bucket padded, so padding it onto the warmed
+        row buckets keeps the projection on shapes warmup compiled.
         """
+        num_rows = hidden_states.shape[0]
+        buckets = self._logits_row_buckets
+        idx = bisect.bisect_left(buckets, num_rows)
+        padded_rows = buckets[idx] if idx < len(buckets) else num_rows
+        if padded_rows != num_rows:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, padded_rows - num_rows))
+
         hidden_states = convert(hidden_states, device=self._spyre_device)
-        return self._model.compute_logits(hidden_states, *args, **kwargs)
+        logits = self._model.compute_logits(hidden_states, *args, **kwargs)
+
+        if padded_rows != num_rows and logits is not None:
+            logits = logits[:num_rows]
+        return logits
 
     def __getattr__(self, name):
         return getattr(self._model, name)
@@ -394,6 +423,10 @@ class TorchSpyreModelRunner(GPUModelRunner):
         # Shape bucketer for runtime dispatch (initialized after model load)
         self.spyre_shape_bucketer: SpyreShapeBucketer | None = None
 
+        # Per-layer paged KV caches, kept so warmup can record the attention
+        # kernels against real pages. Populated by initialize_kv_cache_tensors.
+        self._spyre_kv_caches: dict[str, SpyrePagedKVCache] = {}
+
         # Replace Triton kernel with a pure-PyTorch implementation.
         # GPUModelRunner uses @triton.jit which is mocked on non-GPU platforms.
         # The upstream CPU backend uses a C++ kernel (torch.ops._C) as its
@@ -404,25 +437,6 @@ class TorchSpyreModelRunner(GPUModelRunner):
         # _FuncWrapper; the type mismatch is the point of the patch.
         block_table._compute_slot_mapping_kernel = _compute_slot_mapping_kernel
 
-    @staticmethod
-    def _install_pooling_model_patches(model_config) -> None:
-        """Install model-specific pooling adapters (BERT/RoBERTa token_type, …)."""
-        if model_config.runner_type != "pooling":
-            return
-        from spyre_inference.models import install_pooling_model_patches
-
-        install_pooling_model_patches()
-
-    @staticmethod
-    def _install_decoder_model_patches() -> None:
-        """Install model-specific decoder adapters (Gemma-4 embed scale, …).
-
-        A no-op unless the matching architecture is built (import-guarded + idempotent).
-        """
-        from spyre_inference.models import install_decoder_model_patches
-
-        install_decoder_model_patches()
-
     def load_model(self, load_dummy_weights: bool = False) -> None:
         """Load weights on CPU, move Spyre layers to device, compile, and wrap."""
         logger.info("Loading model %s...", self.model_config.model)
@@ -431,9 +445,6 @@ class TorchSpyreModelRunner(GPUModelRunner):
         if load_dummy_weights:
             self.load_config.load_format = "dummy"
         model_loader = get_model_loader(self.load_config)
-
-        self._install_pooling_model_patches(self.model_config)
-        self._install_decoder_model_patches()
 
         # Pad attention weights (q/k/v/o, and QK-norm) to the stick-aligned head_dim
         # as they stream in, when the platform overrode head_dim (e.g. head_size=64).
@@ -473,7 +484,8 @@ class TorchSpyreModelRunner(GPUModelRunner):
         # Move layer weights to Spyre device.
         self.model.to(device=self._spyre_device)
 
-        # CLS/LAST on Spyre via v1.pool; MEAN stays CPU.
+        # CLS/LAST gather on Spyre. MEAN copies packed [T, H]; reduce is MeanPool.
+        # FP32 linear heads stay on CPU.
         self._pooling_on_spyre = False
         if self.model_config.runner_type == "pooling":
             self._pooling_on_spyre = configure_pooling_for_spyre(self.model, self._spyre_device)
@@ -484,15 +496,21 @@ class TorchSpyreModelRunner(GPUModelRunner):
         # Compile for Spyre (no-op if enforce_eager=True)
         self._compile_for_spyre()
 
+        # Initialize bucket dispatcher for shape bucketing at runtime.
+        self.spyre_shape_bucketer = self._create_shape_bucketer()
+
         # Generative: D2H model outputs. Pooling: keep hidden_states on Spyre.
+        bucketer = self.spyre_shape_bucketer
         self.model = _SpyreModelWrapper(
             self.model,
             self._spyre_device,
             keep_outputs_on_device=self._pooling_on_spyre,
+            logits_row_buckets=(
+                []
+                if bucketer is None
+                else logits_row_buckets(bucketer.bucket_sizes, self.max_num_reqs)
+            ),
         )
-
-        # Initialize bucket dispatcher for shape bucketing at runtime.
-        self.spyre_shape_bucketer = self._create_shape_bucketer()
 
     @staticmethod
     def _model_has_spyre_fp8(model: nn.Module) -> bool:
@@ -525,18 +543,27 @@ class TorchSpyreModelRunner(GPUModelRunner):
         return False
 
     def _create_shape_bucketer(self) -> SpyreShapeBucketer | None:
-        """Create SpyreShapeBucketer if compilation with bucketing is active.
+        """Create SpyreShapeBucketer for 1D body sizes and pooling attention cells.
 
-        Returns None when enforce_eager=True, mode is NONE, or no
-        compile_sizes are configured (e.g. pooling models skip bucketing
-        because their token counts depend on variable input sequence lengths).
+        Decoder and pooling body share 1D ``compile_sizes``. Pooling also
+        keeps attention ``(B, L)`` shapes on the same bucketer; SDPA gather
+        uses those cells, the body does not.
+
+        Pooling keeps a bucketer in eager *and* compile so *runtime* always
+        1D-pads the body. Warmup still differs: compile dummies 1D sizes then
+        each attention cell; eager does one dummy then ``mark_warmed_up()``.
+        Decoder skips a bucketer when eager because 1D pad exists only to hit
+        compiled graphs.
         """
+        if self.model_config.runner_type == "pooling":
+            return SpyreShapeBucketer.for_pooling(self.vllm_config)
+
         if self.vllm_config.model_config.enforce_eager:
-            logger.info("Grarph Recorder disabled (enforce_eager=True)")
+            logger.info("Graph Recorder disabled (enforce_eager=True)")
             return None
 
         if not self.compilation_config.compile_sizes:
-            logger.info("Grarph Recorder disabled (no compile_sizes configured)")
+            logger.info("Graph Recorder disabled (no compile_sizes configured)")
             return None
 
         return SpyreShapeBucketer(self.vllm_config)
@@ -607,10 +634,14 @@ class TorchSpyreModelRunner(GPUModelRunner):
 
     def _compile_blocks(self, fullgraph: bool = True) -> int:
         num_blocks = 0
+        # Models that re-register a slice of `layers` (e.g. gemma-4's self-/cross-decoder)
+        # alias blocks across lists; recompiling one is harmless but would double the count.
+        seen: set[int] = set()
         for blocks in _repeated_block_lists(cast(nn.Module, self.model)):
             for block in blocks:
-                if isinstance(block, PPMissingLayer):
+                if isinstance(block, PPMissingLayer) or id(block) in seen:
                     continue
+                seen.add(id(block))
                 # In place: rebinding blocks[i] to the returned OptimizedModule reparents
                 # the block under `_orig_mod`, renaming every parameter and breaking
                 # reload_weights and save_sharded_state.
@@ -619,13 +650,36 @@ class TorchSpyreModelRunner(GPUModelRunner):
         return num_blocks
 
     def warming_up_model(self) -> None:
-        """Run a dummy forward pass to warm up kernels and optional compile.
+        """Warm kernels / compile.
 
-        In eager mode, pooling models cap token count
-        (``SPYRE_ENCODER_WARMUP_MAX_TOKENS``) and force ``max_num_seqs=1``.
-        Compile mode uses the normal warmup size so shapes match torch.compile.
+        Decoder: dummy each 1D ``compile_sizes`` bucket (largest first), then a dummy
+        logits/sampler run at each *sampled-row* width so the lm_head compiles here
+        rather than mid-request. The two bucket sets differ: body buckets are packed
+        token counts, rows are at most ``max_num_reqs``.
+        Compiled pooling: dummy 1D body sizes, ``mark_warmed_up()``, then each
+        attention ``(B, L)`` at its full size.
+        Eager pooling: one short dummy, then ``mark_warmed_up()``.
+        Upstream dummy skips encoder attention unless ``force_attention=True``.
         """
-        if self.spyre_shape_bucketer is None:
+        is_pooling = self.model_config.runner_type == "pooling"
+        # Before the first trace: see allocate_staging_buffers.
+        allocate_staging_buffers(self.compilation_config.static_forward_context, self._spyre_device)
+
+        if is_pooling and not self.vllm_config.model_config.enforce_eager:
+            logger.info("Warming up model...")
+            t0 = time.time()
+            with _set_spyre_compilation_settings(self.vllm_config):
+                if self.spyre_shape_bucketer is not None:
+                    for size in sorted(self.spyre_shape_bucketer.bucket_sizes, reverse=True):
+                        self._dummy_run(size)
+                    self.spyre_shape_bucketer.mark_warmed_up()
+                self._warmup_pooling_bucket_shapes()
+            if self.spyre_shape_bucketer is not None:
+                self.spyre_shape_bucketer.mark_warmed_up()
+            logger.info("Warmup done in %.3fs.", time.time() - t0)
+            return
+
+        if is_pooling or self.spyre_shape_bucketer is None:
             logger.info("Running single warmup pass (graph manager Disabled)...")
             t0 = time.time()
             num_tokens = min(
@@ -633,26 +687,9 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 self.scheduler_config.max_num_batched_tokens,
             )
             with _set_spyre_compilation_settings(self.vllm_config):
-                use_eager_pooling_warmup = (
-                    self.model_config.runner_type == "pooling"
-                    and self.vllm_config.model_config.enforce_eager
-                )
-                if use_eager_pooling_warmup:
-                    # Match single-sequence embed metadata; cap tokens for DMA.
-                    num_tokens = min(num_tokens, SPYRE_ENCODER_WARMUP_MAX_TOKENS)
-                    saved_max_num_seqs = self.scheduler_config.max_num_seqs
-                    try:
-                        self.scheduler_config.max_num_seqs = 1
-                        logger.info(
-                            "Pooling warmup (eager): %d tokens, max_num_seqs=1 (was %d)",
-                            num_tokens,
-                            saved_max_num_seqs,
-                        )
-                        self._dummy_run(num_tokens)
-                    finally:
-                        self.scheduler_config.max_num_seqs = saved_max_num_seqs
-                else:
-                    self._dummy_run(num_tokens)
+                self._dummy_run(num_tokens)
+            if is_pooling and self.spyre_shape_bucketer is not None:
+                self.spyre_shape_bucketer.mark_warmed_up()
             logger.info("Warmup done in %.3fs.", time.time() - t0)
             return
 
@@ -663,19 +700,110 @@ class TorchSpyreModelRunner(GPUModelRunner):
             bucket_sizes[0] if bucket_sizes else 0,
             bucket_sizes[-1] if bucket_sizes else 0,
         )
+        row_widths = logits_row_buckets(bucket_sizes, self.max_num_reqs)
         t0 = time.time()
         with _set_spyre_compilation_settings(self.vllm_config):
             # Compile largest bucket first: Inductor's internal caches benefit
             # from seeing the most complex shape first, so subsequent smaller
             # shapes compile faster via partial cache hits.
+            widest_hidden_states = None
             for size in sorted(bucket_sizes, reverse=True):
-                self._dummy_run(size)
+                _, last_hidden_states = self._dummy_run(size)
+                if widest_hidden_states is None:
+                    widest_hidden_states = last_hidden_states
+            # Row buckets, not one run per body bucket: the prefill bucket's token count
+            # exceeds any reachable row count, so it would compile an unreachable width.
+            if widest_hidden_states is not None:
+                for rows in sorted(row_widths, reverse=True):
+                    self._dummy_sampler_run(widest_hidden_states[:rows])
         self.spyre_shape_bucketer.mark_warmed_up()
         logger.info(
             "Warmup complete in %.3fs for %d buckets.",
             time.time() - t0,
             len(bucket_sizes),
         )
+        self._record_attention_graphs(bucket_sizes)
+
+    @torch.inference_mode()
+    def _record_attention_graphs(self, token_counts: list[int]) -> None:
+        """Pre-compile the attention.
+
+        The model-level warmup above cannot cover these: ``_dummy_run`` delegates
+        upstream, which passes ``attn_metadata=None``, so ``forward`` returns
+        before touching a kernel. Left lazy, each new variant pays a full
+        Inductor compile mid-serving.
+        """
+        if not envs.SPYRE_ATTN_RECORD:
+            logger.info("Attention graph recording disabled (SPYRE_ATTN_RECORD=0)")
+            return
+        if self.compilation_config.mode is CompilationMode.NONE:
+            logger.info("Attention graph recording disabled (CompilationMode.NONE)")
+            return
+        assert self._spyre_kv_caches, (
+            "Attention graph recording needs the KV cache, but "
+            "_spyre_kv_caches is empty: initialize_kv_cache_tensors() must run first."
+        )
+
+        # Every layer keeps its own kernel cache, so each is recorded separately;
+        # layers sharing a head configuration trace to the same graph and only
+        # the first pays a full Inductor compile.
+        static_ctx = self.compilation_config.static_forward_context
+        t0 = time.time()
+        total = 0
+        # The metadata builders' own bucketer, not a second one built here, so
+        # every bucket recorded is one build() can actually produce.
+        bucketer = self._resolve_builder_attn_bucketer()
+        assert bucketer is not None, "No attention metadata builder exposes a bucketer"
+        with _set_spyre_compilation_settings(self.vllm_config):
+            for layer_name, kv_cache in self._spyre_kv_caches.items():
+                layer = static_ctx.get(layer_name)
+                impl = getattr(layer, "impl", None)
+                if not isinstance(impl, SpyreAttentionImpl):
+                    continue
+                logger.info("Recording attention graphs for layer %s...", layer_name)
+                total += impl.record_graphs(self._spyre_device, bucketer, kv_cache)
+        logger.info(
+            "Attention graph recording complete: %d graphs in %.3fs.",
+            total,
+            time.time() - t0,
+        )
+        # Past the early returns: with recording off, first-use compiles are intended.
+        mark_warmup_complete()
+
+    def _resolve_builder_attn_bucketer(self) -> SpyreAttnBucketer | None:
+        """The attention bucketer the metadata builders dispatch against.
+
+        Returned rather than constructed here, so the recorder compiles exactly
+        the buckets ``build()`` rounds onto -- a second, independently built
+        instance could drift and make every request pad to an unrecorded block
+        count. A model can have several attention groups and, under ubatching,
+        several builders per group; the assert below guards against a future
+        spec-dependent bucket, since today all builders derive buckets from
+        ``cache_config``/``model_config`` alone and so agree by construction.
+        Returns None when no builder exposes a bucketer.
+        """
+        first: SpyreAttnBucketer | None = None
+        for group in self._attn_group_iterator():
+            for builder in group.metadata_builders:
+                bucketer = getattr(builder, "_attn_bucketer", None)
+                if bucketer is None:
+                    continue
+                if first is None:
+                    first = bucketer
+                    continue
+                assert (bucketer.block_size, bucketer.num_blocks_buckets) == (
+                    first.block_size,
+                    first.num_blocks_buckets,
+                ), (
+                    "Attention bucketer buckets diverge between metadata builders: "
+                    f"{type(builder).__name__} has block_size={bucketer.block_size} "
+                    f"num_blocks={bucketer.num_blocks_buckets}, expected "
+                    f"block_size={first.block_size} "
+                    f"num_blocks={first.num_blocks_buckets}. Only one set can be "
+                    "recorded, so a mismatch means some builder pads onto block "
+                    "counts no kernel was compiled for."
+                )
+        return first
 
     def _determine_batch_execution_and_padding(
         self,
@@ -704,17 +832,13 @@ class TorchSpyreModelRunner(GPUModelRunner):
         rest of execute_model (slot_mapping, attention metadata, _preprocess)
         handles padded vs unpadded counts correctly without mutating
         scheduler_output.total_num_scheduled_tokens.
+
+        Decoder and pooling body: 1D ``compile_sizes`` after warmup.
+        Attention ``(B, L)`` is applied in ``SpyreEncoderAttentionImpl``.
         """
-        if self.spyre_shape_bucketer is not None and self.spyre_shape_bucketer.is_warmed_up:
-            desc = self.spyre_shape_bucketer.dispatch(num_tokens)
-            if desc is not None:
-                return (
-                    CUDAGraphMode.NONE,
-                    BatchDescriptor(num_tokens=desc.padded_num_tokens),
-                    False,
-                    None,
-                    None,
-                )
+        pad = self._spyre_bucket_batch_descriptor(num_tokens, num_reqs, num_scheduled_tokens_np)
+        if pad is not None:
+            return CUDAGraphMode.NONE, pad, False, None, None
 
         return super()._determine_batch_execution_and_padding(
             num_tokens=num_tokens,
@@ -730,9 +854,75 @@ class TorchSpyreModelRunner(GPUModelRunner):
             num_encoder_reqs=num_encoder_reqs,
         )
 
+    def _spyre_bucket_batch_descriptor(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> BatchDescriptor | None:
+        """Padded ``BatchDescriptor`` for a warmed 1D body bucket, or None.
+
+        Decoder and pooling body share this path. Encoder SDPA ``(B, L)`` is
+        applied in ``SpyreEncoderAttentionImpl``, not here.
+        """
+        del num_reqs, num_scheduled_tokens_np
+        bucketer = self.spyre_shape_bucketer
+        if bucketer is None or not bucketer.is_warmed_up:
+            return None
+        desc = bucketer.dispatch(num_tokens)
+        if desc is None:
+            return None
+        return BatchDescriptor(num_tokens=desc.padded_num_tokens)
+
+    def _warmup_pooling_bucket_shapes(self) -> None:
+        """Dummy each attention ``(B, L)``. Body already 1D-pads after warmup."""
+        if self.spyre_shape_bucketer is not None:
+            shapes = self.spyre_shape_bucketer.encoder_shapes
+        else:
+            shapes = pooling_warmup_shapes(
+                max_num_seqs=self.scheduler_config.max_num_seqs,
+                max_model_len=self.model_config.max_model_len,
+                max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            )
+        if not shapes:
+            logger.warning("No pooling warmup shapes; falling back to a single dummy run")
+            self._dummy_run(
+                min(16, self.scheduler_config.max_num_batched_tokens),
+                force_attention=True,
+            )
+            return
+
+        saved_max_num_seqs = self.scheduler_config.max_num_seqs
+        try:
+            for batch_size, prompt_len in shapes:
+                self.scheduler_config.max_num_seqs = batch_size
+                num_tokens = batch_size * prompt_len
+                logger.info(
+                    "Pooling attention warmup: exact bucket "
+                    "batch_size=%d prompt_len=%d (%d tokens)",
+                    batch_size,
+                    prompt_len,
+                    num_tokens,
+                )
+                hidden_states, _ = self._dummy_run(num_tokens, force_attention=True)
+                self._dummy_pooler_run(hidden_states)
+        finally:
+            self.scheduler_config.max_num_seqs = saved_max_num_seqs
+
     @torch.inference_mode()
     def _dummy_run(self, *args, **kwargs):
-        """Force D2H for warmup: upstream ``hidden_states[logit_indices]`` needs CPU."""
+        """Force D2H during dummy forward (upstream logits index is CPU).
+
+        Pooling must pass ``force_attention=True``. Upstream skips attention
+        metadata unless that flag or a FULL cudagraph is set; encoder impl
+        then does ``if attn_metadata is None: return output`` and never
+        compiles pack/SDPA. Real ``execute_model`` always has metadata.
+
+        Decoder warmup also publishes null KV slots so the scatter-in-graph
+        path (#610) sees the same binding as a real step.
+        """
+        if self.model_config.runner_type == "pooling":
+            kwargs.setdefault("force_attention", True)
         # Read out of the passthrough rather than named in the signature, which would
         # pin this override to upstream's parameter order across vLLM bumps.
         num_tokens = kwargs.get("num_tokens", args[0] if args else None)
@@ -755,22 +945,61 @@ class TorchSpyreModelRunner(GPUModelRunner):
             and hidden_states.device.type != "spyre"
         ):
             hidden_states = convert(hidden_states, self._spyre_device)
-        # Sampler warmup only needs last_hidden_states on CPU.
         return hidden_states, last_hidden_states
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        """Drop token-level tasks on Spyre pooler (slice views are unsafe)."""
-        tasks = super().get_supported_pooling_tasks()
-        if not self._pooling_on_spyre:
-            return tasks
-
-        supported = [t for t in tasks if t not in TOKEN_POOLING_TASKS]
-        if tasks and not supported:
-            raise RuntimeError(
-                f"Model {self.model_config.model} supports only token-level "
-                "pooling, which is unsupported while the pooler runs on Spyre."
+    def _unpad_encoder_hidden(
+        self, hidden_states: torch.Tensor, num_scheduled_tokens: int
+    ) -> torch.Tensor:
+        """Drop 1D body pad tokens before pooling."""
+        if hidden_states.shape[0] != num_scheduled_tokens:
+            hidden_states = select_rows(
+                hidden_states, torch.arange(num_scheduled_tokens, dtype=torch.int64)
             )
-        return supported
+        return hidden_states
+
+    def _dummy_pooler_run_task(
+        self,
+        hidden_states: torch.Tensor,
+        task: PoolingTask,
+    ) -> PoolerOutput:
+        """Same as GPU dummy pooler, but the cursor stays on CPU like ``_pool``."""
+        if not self._pooling_on_spyre:
+            return super()._dummy_pooler_run_task(hidden_states, task)
+
+        num_tokens = hidden_states.shape[0]
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = min(num_tokens, max_num_reqs)
+        min_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens_np = np.full(num_reqs, min_tokens_per_req)
+        num_scheduled_tokens_np[-1] += num_tokens % num_reqs
+        assert np.sum(num_scheduled_tokens_np) == num_tokens
+        assert len(num_scheduled_tokens_np) == num_reqs
+
+        req_num_tokens = num_tokens // num_reqs
+        dummy_prompt_lens = torch.from_numpy(num_scheduled_tokens_np)
+        dummy_token_ids = torch.zeros(
+            (num_reqs, req_num_tokens), dtype=torch.int32, device=self.device
+        )
+
+        model = cast(VllmModelForPooling, self.get_model())
+        dummy_pooling_params = PoolingParams(task=task)
+        dummy_pooling_params.verify(self.model_config)
+        to_update = model.pooler.get_pooling_updates(task)
+        to_update.apply(dummy_pooling_params)
+
+        dummy_metadata = PoolingMetadata(
+            prompt_lens=dummy_prompt_lens,
+            prompt_token_ids=dummy_token_ids,
+            prompt_token_ids_cpu=dummy_token_ids.cpu(),
+            pooling_params=[dummy_pooling_params] * num_reqs,
+            pooling_states=[PoolingStates() for i in range(num_reqs)],
+        )
+        dummy_metadata.build_pooling_cursor(
+            num_scheduled_tokens_np,
+            seq_lens_cpu=dummy_prompt_lens,
+            device=torch.device("cpu"),
+        )
+        return model.pooler(hidden_states=hidden_states, pooling_metadata=dummy_metadata)
 
     def _pool(
         self,
@@ -779,21 +1008,23 @@ class TorchSpyreModelRunner(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput | None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        """Pool on the activation device; D2H only the pooled vectors.
+        """Pool on the activation device; copy only the pooled vectors back.
 
-        MEAN / FP32 heads keep the pooler on CPU — delegate to
-        ``GPUModelRunner._pool``. On-Spyre CLS/LAST still overrides the private
-        hook: dim-0 crop must use ``index_select`` (not ``[:n]``), and pooled
-        D2H must use ``convert`` (not CUDA ``.to`` / AsyncGPU). Drop this once
-        those ops are safe (fallback probes / #3507–#3508).
+        FP32 linear heads keep the pooler on CPU and use
+        ``GPUModelRunner._pool``. Do not crop here: Spyre dim-0 slices are
+        unsafe, and each method gathers itself (CLS/LAST rows, MEAN
+        per-request rows, token AllPool ranges).
         """
         assert not self.use_async_scheduling, (
             "async scheduling is unsupported while pooling on Spyre"
         )
 
         if not self._pooling_on_spyre:
+            hidden_states = self._unpad_encoder_hidden(
+                convert(hidden_states, "cpu"), num_scheduled_tokens
+            )
             return super()._pool(
-                convert(hidden_states, "cpu"),
+                hidden_states,
                 num_scheduled_tokens,
                 num_scheduled_tokens_np,
                 kv_connector_output,
@@ -804,25 +1035,16 @@ class TorchSpyreModelRunner(GPUModelRunner):
             "Either all or none of the requests in a batch must be pooling request"
         )
 
-        for params in self.input_batch.pooling_params.values():
-            if params.task in TOKEN_POOLING_TASKS:
-                raise NotImplementedError(
-                    f"Pooling task {params.task!r} returns per-sequence views "
-                    "of hidden_states, which is unsupported while the pooler "
-                    "runs on Spyre."
-                )
-
-        # Crop via index_select — Spyre dim-0 slice views are unsafe.
+        # Unlike upstream's cheap [:num_scheduled_tokens] slice, cropping here
+        # would need index_select (Spyre dim-0 slice views are unsafe) and
+        # would make its shape vary with real content on every request.
+        # Skip it: each method gathers itself from host cursor counts.
         hidden_states = convert(hidden_states, self._spyre_device)
-        if hidden_states.shape[0] != num_scheduled_tokens:
-            hidden_states = select_rows(
-                hidden_states, torch.arange(num_scheduled_tokens, dtype=torch.int64)
-            )
 
-        # Mirror GPUModelRunner._pool after crop. Build the cursor on CPU:
-        # upstream does ``cumsum[1:] - 1`` for last_token_indices; that offset-1
-        # view is not stick-aligned on Spyre (copy_from_d2d fails). SpyreCLS/Last
-        # only read host ``num_scheduled_tokens_cpu`` via cursor_row_indices_cpu.
+        # Build the cursor on CPU: upstream does ``cumsum[1:] - 1`` for
+        # last_token_indices; that offset-1 view is not stick-aligned on
+        # Spyre (copy_from_d2d fails). SpyreCLS/Last only read host
+        # ``num_scheduled_tokens_cpu`` via cursor_row_indices_cpu.
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs]
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
@@ -877,10 +1099,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
         """
         from vllm.v1.worker.utils import bind_kv_cache
 
-        from spyre_inference.v1.attention.backends.spyre_attn import (
-            SpyrePagedKVCache,
-            slot_major_kv_layout,
-        )
+        from spyre_inference.v1.attention.backends.spyre_attn import slot_major_kv_layout
 
         # One spec per layer. disable_hybrid_kv_cache_manager (set in the
         # platform) collapses hybrid models into a single UniformTypeKVCacheSpecs
@@ -936,6 +1155,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
             self.compilation_config.static_forward_context,
             self.kv_caches,
         )
+        self._spyre_kv_caches = dict(kv_caches)
         return kv_caches
 
     # --- Stubs copied from CPUModelRunner ---
