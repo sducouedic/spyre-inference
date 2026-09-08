@@ -69,6 +69,21 @@ def _parse_buckets(raw: str | None) -> list[int] | None:
     return values
 
 
+def _powers_of_two_up_to(n: int, start: int = 1) -> tuple[int, ...]:
+    """Powers of 2 in [start, n] (start rounded up to a power of 2), plus n itself."""
+    if n < 1:
+        return ()
+    v = 1
+    while v < start:
+        v *= 2
+    result = []
+    while v < n:
+        result.append(v)
+        v *= 2
+    result.append(n)
+    return tuple(result)
+
+
 def _resolve_buckets(
     raw: str | None, limit: int, name: str, default: Callable[[], list[int]]
 ) -> list[int]:
@@ -112,10 +127,6 @@ class SpyreAttnBucketer:
         self.block_size = block_size
         max_model_len = vllm_config.model_config.max_model_len
         max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-
-        # Imported at call time, not module scope: spyre_attn imports this
-        # module, so a top-level import back into it would be circular.
-        from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_to
 
         if block_size & (block_size - 1):
             # Not fatal: _powers_of_two_up_to rounds the start up to a power of
@@ -161,6 +172,11 @@ class SpyreAttnBucketer:
             {(kv + block_size - 1) // block_size for kv in self._kv_buckets}
         )
 
+        # The batched decode kernel adds a sequence axis, so it needs a second ladder.
+        self._num_seqs_buckets: list[int] = list(
+            _powers_of_two_up_to(vllm_config.scheduler_config.max_num_seqs)
+        )
+
         logger.info(
             "SpyreAttnBucketer: %d kv buckets [%d..%d], %d query buckets [%d..%d], "
             "max num_blocks=%d",
@@ -184,6 +200,10 @@ class SpyreAttnBucketer:
     @property
     def num_blocks_buckets(self) -> list[int]:
         return self._num_blocks_buckets
+
+    @property
+    def num_seqs_buckets(self) -> list[int]:
+        return self._num_seqs_buckets
 
     def find_kv_bucket(self, kv_len: int) -> int | None:
         return self._round_up(kv_len, self._kv_buckets)

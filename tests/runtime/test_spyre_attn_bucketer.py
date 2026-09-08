@@ -21,20 +21,23 @@ from unittest.mock import MagicMock
 import pytest
 
 from spyre_inference import envs
-from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_to
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucketer,
     _parse_buckets,
+    _powers_of_two_up_to,
 )
 
 BLOCK_SIZE = 64
 
 
-def make_config(max_model_len=2048, max_num_batched_tokens=512, block_size=BLOCK_SIZE):
+def make_config(
+    max_model_len=2048, max_num_batched_tokens=512, block_size=BLOCK_SIZE, max_num_seqs=8
+):
     config = MagicMock()
     config.cache_config.block_size = block_size
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    config.scheduler_config.max_num_seqs = max_num_seqs
     return config
 
 
@@ -188,6 +191,23 @@ class TestVariants:
         """Dense buckets here would be tens of thousands of Inductor compiles."""
         b = SpyreAttnBucketer(make_config(32768, 2048))
         assert len(b.variants()) < 500
+
+    def test_num_seqs_buckets_are_powers_of_two_to_max_num_seqs(self):
+        b = SpyreAttnBucketer(make_config(max_num_seqs=8))
+        assert b.num_seqs_buckets == [1, 2, 4, 8]
+
+    def test_num_seqs_buckets_top_out_at_max_num_seqs(self):
+        b = SpyreAttnBucketer(make_config(max_num_seqs=6))
+        assert b.num_seqs_buckets[-1] == 6
+        assert b.num_seqs_buckets == [1, 2, 4, 6]
+
+    def test_num_blocks_buckets_follow_the_kv_buckets(self, monkeypatch):
+        """A kv override moves the ladder the attention impl dispatches onto, so the
+        impl cannot land on a low block count that warmup never recorded."""
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "512,1024,2048")
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config())
+        assert b.num_blocks_buckets == [8, 16, 32]
 
 
 class TestEnvOverride:

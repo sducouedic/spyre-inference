@@ -96,25 +96,6 @@ INT32_ELEMS_PER_STICK = 32
 _MIN_BATCHED_SEQS = 4
 
 
-def _powers_of_two_up_to(n: int, start: int = 1) -> tuple[int, ...]:
-    """Powers of 2 in [start, n], plus n itself if it is not already a power of 2.
-
-    ``start`` is rounded up to a power of 2 first, keeping a pure doubling
-    sequence. A ``start`` above ``n`` yields just ``(n,)``.
-    """
-    if n < 1:
-        return ()
-    v = 1
-    while v < start:
-        v *= 2
-    result = []
-    while v < n:
-        result.append(v)
-        v *= 2
-    result.append(n)
-    return tuple(result)
-
-
 def _find_bucket(n: int, buckets: tuple[int, ...]) -> int | None:
     """Smallest bucket >= n, or None when n exceeds the top bucket."""
     idx = bisect.bisect_left(buckets, n)
@@ -654,20 +635,14 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             static_ctx[name] for name in layer_names if name in static_ctx
         )
 
-        # Buckets for the batched decode fast path. One compiled kernel
-        # per bucket. TODO: expose as engine args if configurability is needed.
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        max_num_blocks_per_seq = (
-            model_config.max_model_len + self.block_size - 1
-        ) // self.block_size
-        self._num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
-        self._num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_blocks_per_seq)
-
         # Owned here, not by the recorder, so a bucket build() can emit is
         # always a bucket that was compiled: the warmup recorder reads this
         # same instance back (spyre_model_runner._record_attention_graphs)
         # rather than constructing a second one that could drift.
         self._attn_bucketer = SpyreAttnBucketer(vllm_config)
+
+        self._num_seqs_buckets: tuple[int, ...] = tuple(self._attn_bucketer.num_seqs_buckets)
+        self._num_blocks_buckets: tuple[int, ...] = tuple(self._attn_bucketer.num_blocks_buckets)
 
     def _get_zero_tile(self, aligned_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
