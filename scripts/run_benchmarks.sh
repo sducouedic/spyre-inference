@@ -232,9 +232,6 @@ for param_set in "${param_sets[@]}"; do
                 $ignore_eos_arg
                 $shuffle_arg
                 --max-concurrency $concurrency
-                --plot-dataset-stats
-                --plot-timeline
-                --timeline-itl-thresholds 100,600
             " > ${experiments_results}/bench_output.txt
 
             vllm bench serve \
@@ -254,10 +251,7 @@ for param_set in "${param_sets[@]}"; do
                 --custom-output-len $custom_output_len \
                 $ignore_eos_arg \
                 $shuffle_arg \
-                --max-concurrency $concurrency \
-                --plot-dataset-stats \
-                --plot-timeline \
-                --timeline-itl-thresholds 100,600 >> ${experiments_results}/bench_output.txt 2>&1
+                --max-concurrency $concurrency >> ${experiments_results}/bench_output.txt 2>&1
 
             EXIT_STATUS=$?
 
