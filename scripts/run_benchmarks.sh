@@ -69,6 +69,13 @@ done
 # try installing libraries for visualization plots
 uv pip install pandas matplotlib plotly 2>/dev/null
 
+# pick up Spyre hardware libs if they've been installed via
+# scripts/install-pinned-rpms.sh; needed by both the server and the client
+if [ -f ~/spyre-libs/env.sh ]; then
+    source ~/spyre-libs/env.sh
+fi
+
+export SPYRE_NUM_CPUS=8
 export HF_HOME=/models/huggingface_cache
 model=ibm-granite/granite-3.3-8b-instruct
 
