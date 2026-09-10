@@ -1055,7 +1055,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         query_row_ids_cpu = None
         block_ids_padded_cpu = None
         mask_by_block_cpu = None
-        if max_query_len == 1 and num_seqs >= _MIN_BATCHED_SEQS:
+        if max_query_len == 1 and num_seqs >= _MIN_BATCHED_SEQS and envs.SPYRE_BATCHED_DECODE:
             # Real counts, not padded: this path has its own buckets, so an
             # inflated count would only push it onto a larger bucket for no
             # reason. Safe because padding only appends blocks. Under a window
