@@ -212,25 +212,26 @@ def _build_query_row_tables(
 ) -> list[torch.Tensor]:
     """Build query gather/dest row tables for the whole batch.
 
-    Builds one contiguous CPU tensor for the whole batch and mirrors it to the
-    Spyre device with a single convert() call, then clones per-sequence rows so
-    each compiled kernel sees an offset-0 buffer (torch-spyre#3770).
+    Each row is sized and filled on the host, then converted on its own, so every
+    table reaches the device as a contiguous offset-0 buffer (torch-spyre#3770).
+    Building one batched device tensor and slicing per sequence would instead hand
+    the kernel a view at a nonzero storage offset, and spyre::copy_from_d2d
+    specialises on (shape, src_off, dst_off) -- one SDSC binary per sequence index,
+    compiled mid-serving. A host->device convert() never reaches that op.
     """
     num_seqs = attn_metadata.num_seqs
     starts = attn_metadata.query_start_loc[:num_seqs].cpu()
     lens = attn_metadata.query_start_loc[1 : num_seqs + 1].cpu() - starts
     aligned_query_lens = attn_metadata.aligned_query_lens
-    max_index_len = max((_stick_aligned_len(al) for al in aligned_query_lens), default=0)
-    rows = torch.zeros(num_seqs, max_index_len, dtype=torch.int32)
+    tables = []
     for s, aligned in enumerate(aligned_query_lens):
+        # Width is the one the recorder traced for this query length, not the batch max.
+        index_len = _stick_aligned_len(aligned)
+        row = torch.zeros(index_len, dtype=torch.int32)
         last_real = max(int(lens[s]) - 1, 0)
-        rows[s, :aligned] = (starts[s] + torch.arange(aligned).clamp(max=last_real)).to(torch.int32)
-    rows_dev = convert(rows, device=device)
-    # Per-seq clones keep offset 0 for the compiled kernel (torch-spyre#3770), each
-    # narrowed to the width the recorder traced for that query length, not the batch max.
-    return [
-        rows_dev[s, : _stick_aligned_len(aligned_query_lens[s])].clone() for s in range(num_seqs)
-    ]
+        row[:aligned] = (starts[s] + torch.arange(aligned).clamp(max=last_real)).to(torch.int32)
+        tables.append(convert(row, device=device))
+    return tables
 
 
 def _page_attn_kernel(
