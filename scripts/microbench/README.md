@@ -136,3 +136,50 @@ unsupported ops to CPU, which would otherwise be counted as a Spyre result.
 - The kernel specializes per `(num_blocks, aligned_max_query_len)`, so a sweep
   legitimately triggers many recompiles; the dynamo recompile limit is raised to 4096.
   Warmup runs before the profiled windows so no compile lands inside a measured window.
+
+---
+
+## Query-row-table micro-benchmark
+
+`query_row_tables_microbench.py` measures `_build_query_row_tables`, the host-side
+metadata prep that builds one query gather/dest row table per sequence. Separate script
+because there is no kernel to attribute: it is a Python loop of small CPU fills plus one
+`convert()` per sequence, so **wall clock** is the signal, not profiler device time.
+
+```bash
+.venv/bin/python3 scripts/microbench/query_row_tables_microbench.py
+.venv/bin/python3 scripts/microbench/query_row_tables_microbench.py --device spyre
+```
+
+Cost scales with `num_seqs`, not with KV length and only weakly with query width — one
+`convert()` per sequence dominates, and each is a fixed-cost small transfer. Use
+`us_per_seq` rather than `median_ms` when comparing shapes with different batch sizes,
+since the per-call floor makes small batches look worse per sequence than they are.
+
+### Shapes
+
+Repeatable `--shape name:spec`; omit for the built-in sweep.
+
+```text
+decode:64          64 sequences, query_len 1 each
+prefill:8x512      8 sequences, query_len 512 each
+mixed:4x512+60     4 prefills of 512 plus 60 decodes
+```
+
+### Query buckets
+
+`aligned_query_lens` sets each table's width, so the script reproduces `build()`'s rule:
+`query_len <= 1` stays 1, anything longer rounds up to a query bucket. Buckets default to
+`SpyreAttnBucketer`'s own default (`{1}` plus multiples of 512 up to
+`--max-batched-tokens`); `--query-buckets` / `SPYRE_ATTN_QUERY_BUCKETS` override it. Set
+these to whatever the engine under study uses, or the measured widths will not be its
+widths.
+
+### Reading the numbers
+
+- `--device cpu` isolates the host fill; `--device spyre` adds the per-sequence H2D
+  transfer on top, which dominates.
+- `max_ms` can spike well above the median on `spyre` at larger `num_seqs`. Those are
+  transfer hiccups, not fill cost — compare medians.
+- Every call pays a fixed floor regardless of query length, so `us_per_seq` on the
+  single-sequence rows overstates the marginal per-sequence cost.
