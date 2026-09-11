@@ -14,7 +14,6 @@
 
 """Paged KV-cache attention backend for Spyre using a dense page tensor and online softmax."""
 
-import bisect
 import contextlib
 import functools
 import time
@@ -91,14 +90,6 @@ def _record_block(name: str):
 # padded to this width so each row starts on a stick boundary; see
 # SpyreAttentionMetadata.page_index_tables.
 INT32_ELEMS_PER_STICK = 32
-
-
-def _find_bucket(n: int, buckets: tuple[int, ...]) -> int | None:
-    """Smallest bucket >= n, or None when n exceeds the top bucket."""
-    idx = bisect.bisect_left(buckets, n)
-    if idx < len(buckets):
-        return buckets[idx]
-    return None
 
 
 class SpyrePagedKVCache(NamedTuple):
@@ -672,7 +663,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # A fully-masked padded tile would divide by a zero softmax
             # denominator, so zero real blocks must stay zero.
             return 0
-        padded = SpyreAttnBucketer._round_up(num_blocks, self._attn_bucketer.num_blocks_buckets)
+        padded = self._attn_bucketer.find_blocks_bucket(num_blocks)
         # Unreachable: the top bucket covers ceil(max_model_len / block_size),
         # and num_blocks here is bounded by the same max_model_len.
         assert padded is not None, (
@@ -1036,12 +1027,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             blocks_per_seq = real_num_blocks if active_block_indices is None else num_active
 
             decode_blocks = blocks_per_seq[:num_decode_seqs]
-            b_seqs = SpyreAttnBucketer._round_up(
-                num_decode_seqs, self._attn_bucketer._num_seqs_buckets
-            )
-            b_blocks = SpyreAttnBucketer._round_up(
-                max(decode_blocks), self._attn_bucketer._num_blocks_buckets
-            )
+            b_seqs = self._attn_bucketer.find_sequence_bucket(num_decode_seqs)
+            b_blocks = self._attn_bucketer.find_blocks_bucket(max(decode_blocks))
 
             if b_seqs is not None and b_blocks is not None:
                 padded_num_seqs = b_seqs

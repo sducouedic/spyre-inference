@@ -224,6 +224,9 @@ class SpyreAttnBucketer:
     def find_sequence_bucket(self, num_seqs: int) -> int | None:
         return self._round_up(num_seqs, self._num_seqs_buckets)
 
+    def find_blocks_bucket(self, num_blocks: int) -> int | None:
+        return self._round_up(num_blocks, self._num_blocks_buckets)
+
     @staticmethod
     def _round_up(n: int, buckets: list[int]) -> int | None:
         idx = bisect.bisect_left(buckets, n)
