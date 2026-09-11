@@ -192,14 +192,11 @@ class TestVariants:
         b = SpyreAttnBucketer(make_config(32768, 2048))
         assert len(b.variants()) < 500
 
-    def test_num_seqs_buckets_are_powers_of_two_to_max_num_seqs(self):
-        b = SpyreAttnBucketer(make_config(max_num_seqs=8))
-        assert b.num_seqs_buckets == [1, 2, 4, 8]
-
-    def test_num_seqs_buckets_top_out_at_max_num_seqs(self):
-        b = SpyreAttnBucketer(make_config(max_num_seqs=6))
-        assert b.num_seqs_buckets[-1] == 6
-        assert b.num_seqs_buckets == [1, 2, 4, 6]
+    def test_num_seqs_buckets_ladder_from_min_batched_to_max_num_seqs(self):
+        """Below _MIN_BATCHED_SEQS a batch takes the per-seq loop, so the ladder
+        starts there rather than at 1, and tops out at max_num_seqs."""
+        assert SpyreAttnBucketer(make_config(max_num_seqs=8)).num_seqs_buckets == [4, 8]
+        assert SpyreAttnBucketer(make_config(max_num_seqs=6)).num_seqs_buckets == [4, 6]
 
     def test_num_blocks_buckets_follow_the_kv_buckets(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "512,1024,2048")
