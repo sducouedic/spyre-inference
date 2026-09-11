@@ -264,6 +264,7 @@ for param_set in "${param_sets[@]}"; do
         $prefix_caching_arg >> ${experiments_results}/serving_output.txt 2>&1 &
 
     PID=$!  # Capture PID
+    server_start_ts=$(date +%s)
 
     # Save all bash variables
     declare -p > ${experiments_results}/experiment_config.log
@@ -273,6 +274,11 @@ for param_set in "${param_sets[@]}"; do
     while true; do
         echo "Check server ready"
         if grep -q "Application startup complete" ${experiments_results}/serving_output.txt; then
+
+            # the polling interval below quantizes this to ~5s
+            server_ready_sec=$(( $(date +%s) - server_start_ts ))
+            echo "Server ready in ${server_ready_sec}s"
+            echo "$server_ready_sec" > ${experiments_results}/server_startup_seconds.txt
 
             echo "Starting vllm bench serve..."
 
