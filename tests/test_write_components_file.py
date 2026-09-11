@@ -14,15 +14,21 @@
 
 """CPU-only tests for the CI components.txt generator (no hardware needed).
 
-torch-spyre keys its kernel cache on versions read from this file, so the
-invariants that matter are: the versions describe the RPMs actually extracted,
-a package never picks up a longer sibling's version (`-devel`), and `--merge`
-leaves untouched components alone.
+The invariants: the versions describe the RPMs actually extracted, a package
+never picks up a longer sibling's version (`-devel`), and `--merge` leaves
+untouched components alone.
+
+The cache-key tests feed the generated file to torch-spyre's own
+`_get_dxp_version` and `code_hash` rather than re-deriving the key format here,
+so they check the real contract: different RPMs, different key.
 """
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "write_components_file.py"
 
@@ -212,21 +218,6 @@ def test_merge_with_no_matching_arch_rpms_is_a_noop(tmp_path):
     assert out.read_text() == before
 
 
-def test_output_feeds_a_stable_cache_key(tmp_path):
-    """Mirrors torch-spyre's _get_dxp_version parse of LIB_VERSION_FILE."""
-    proc, text = _run(tmp_path, _rpms())
-    assert proc.returncode == 0, proc.stderr
-    versions = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        name, _, ver = line.partition(":")
-        if name.strip() in ("ibm-deeptools", "ibm-flex"):
-            versions[name.strip()] = ver.strip()
-    assert versions == {"ibm-deeptools": DEEPTOOLS_V, "ibm-flex": FLEX_V}
-
-
 def test_real_lock_parses(tmp_path):
     """The checked-in lock must be readable by the script's own loader."""
     sys.path.insert(0, str(SCRIPT.parent))
@@ -234,3 +225,70 @@ def test_real_lock_parses(tmp_path):
 
     names = package_names(load_data(str(SCRIPT.parent.parent.parent / "spyre-rpms.lock")))
     assert "ibm-deeptools" in names and "ibm-flex" in names
+
+
+# The cache-key tests below drive torch-spyre directly; a venv older than the
+# torch-spyre pin lacks this module. Guard those two tests only -- everything
+# above exercises the script alone and must still run.
+requires_kernel_cache = pytest.mark.skipif(
+    importlib.util.find_spec("torch_spyre.execution.kernel_cache") is None,
+    reason="installed torch-spyre predates execution.kernel_cache; run `uv sync`",
+)
+
+
+def _cache_key_for(components_path, monkeypatch):
+    """torch-spyre's own cache key for a components.txt, kernel content fixed."""
+    from torch._inductor.codecache import code_hash
+    from torch_spyre.execution.kernel_cache import _get_dxp_version
+
+    monkeypatch.setenv("LIB_VERSION_FILE", str(components_path))
+    _get_dxp_version.cache_clear()  # lru_cache would pin the first file read
+    return code_hash(b"identical-kernel-content", extra=_get_dxp_version())
+
+
+@requires_kernel_cache
+def test_two_rpm_sets_give_torch_spyre_two_cache_keys(tmp_path, monkeypatch):
+    """Two different RPM sets must produce two different torch-spyre cache keys.
+
+    This is the whole point of the script: an identical kernel compiled against
+    different deeptools/flex builds must not collide in the cache. Rather than
+    re-deriving the key format here, feed each generated file to torch-spyre's
+    own `_get_dxp_version` and `code_hash` and require the results to differ.
+    """
+    old_flex = "2.0.0-0.main.1+553.8581a91_384.el10"
+    new_flex = "3.1.0-0.main.7+9999.abcdef1_777.el10"
+
+    keys = []
+    for tag, flex_v in (("a", old_flex), ("b", new_flex)):
+        case = tmp_path / tag
+        case.mkdir()
+        rpms = [
+            f"ibm-deeptools-{DEEPTOOLS_V}.x86_64.rpm",
+            f"ibm-deeptools-devel-{DEEPTOOLS_V}.x86_64.rpm",
+            f"ibm-flex-{flex_v}.x86_64.rpm",
+        ]
+        proc, text = _run(case, rpms)
+        assert proc.returncode == 0, proc.stderr
+        assert flex_v in text
+
+        # Kernel content is fixed, so only the components file can move the key.
+        keys.append(_cache_key_for(case / "out" / "components.txt", monkeypatch))
+
+    assert keys[0] != keys[1], (
+        "same cache key for different ibm-flex builds: a stale kernel would be "
+        "reused across compiler versions"
+    )
+
+
+@requires_kernel_cache
+def test_same_rpms_give_torch_spyre_a_stable_cache_key(tmp_path, monkeypatch):
+    """The converse: unchanged RPMs must not invalidate the cache."""
+    keys = []
+    for tag in ("a", "b"):
+        case = tmp_path / tag
+        case.mkdir()
+        proc, _ = _run(case, _rpms())
+        assert proc.returncode == 0, proc.stderr
+        keys.append(_cache_key_for(case / "out" / "components.txt", monkeypatch))
+
+    assert keys[0] == keys[1], "identical RPM sets produced different cache keys"
