@@ -213,12 +213,9 @@ def _build_query_row_tables(
 ) -> list[torch.Tensor]:
     """Build query gather/dest row tables for the whole batch.
 
-    Each row is sized and filled on the host, then converted on its own, so every
-    table reaches the device as a contiguous offset-0 buffer (torch-spyre#3770).
-    Building one batched device tensor and slicing per sequence would instead hand
-    the kernel a view at a nonzero storage offset, and spyre::copy_from_d2d
-    specialises on (shape, src_off, dst_off) -- one SDSC binary per sequence index,
-    compiled mid-serving. A host->device convert() never reaches that op.
+    Each row is converted on its own so it lands at storage offset 0
+    (torch-spyre#3770); slicing a batched device tensor instead hits
+    spyre::copy_from_d2d, which recompiles per (shape, src_off, dst_off).
     """
     num_seqs = attn_metadata.num_seqs
     starts = attn_metadata.query_start_loc[:num_seqs].cpu()
@@ -226,7 +223,7 @@ def _build_query_row_tables(
     aligned_query_lens = attn_metadata.aligned_query_lens
     tables = []
     for s, aligned in enumerate(aligned_query_lens):
-        # Width is the one the recorder traced for this query length, not the batch max.
+        # Width the recorder traced for this query length, not the batch max.
         index_len = _stick_aligned_len(aligned)
         row = torch.zeros(index_len, dtype=torch.int32)
         last_real = max(int(lens[s]) - 1, 0)
