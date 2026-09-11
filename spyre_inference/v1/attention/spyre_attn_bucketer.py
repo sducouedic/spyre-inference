@@ -92,31 +92,36 @@ def _powers_of_two_up_to(n: int, start: int = 1) -> tuple[int, ...]:
 def _resolve_buckets(
     raw: str | None, limit: int, name: str, default: Callable[[], list[int]]
 ) -> list[int]:
-    """One axis's buckets: the env override topped up to ``limit``, else ``default()``.
+    """One axis's buckets: the env override clamped to ``limit``, else ``default()``.
 
     ``limit`` bounds the lengths the engine can schedule (max_model_len for kv,
-    max_num_batched_tokens for query); an override topping out below it would
-    leave that range with no bucket, missing the lookup for batches warmup was
-    meant to cover. Only an override can be short (defaults already end at their
-    limit). Entries above the limit are left alone -- unreachable, not wrong.
+    max_num_batched_tokens for query, max_num_seqs for the batch axis). Entries
+    above it are unreachable, so they are dropped, and ``limit`` itself is added
+    when missing.
     """
     buckets = _parse_buckets(raw)
     if buckets is None:
         return default()
-    if buckets[-1] < limit:
+    kept = [b for b in buckets if b <= limit]
+    if len(kept) != len(buckets):
         logger.warning(
-            "%s tops out at %d, below the %d it must cover; appending %d. Lengths in "
-            "(%d, %d] would otherwise have no recorded bucket and would compile an "
-            "attention kernel in the serving path.",
+            "%s lists %s above the %d it must cover; dropping them as unreachable.",
             name,
-            buckets[-1],
-            limit,
-            limit,
-            buckets[-1],
+            [b for b in buckets if b > limit],
             limit,
         )
-        buckets = [*buckets, limit]
-    return buckets
+    if not kept or kept[-1] < limit:
+        logger.warning(
+            "%s does not cover %d; appending it. Lengths in (%d, %d] would otherwise "
+            "have no recorded bucket and would compile an attention kernel in the "
+            "serving path.",
+            name,
+            limit,
+            kept[-1] if kept else 0,
+            limit,
+        )
+        kept.append(limit)
+    return kept
 
 
 class SpyreAttnBucketer:

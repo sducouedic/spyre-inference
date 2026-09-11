@@ -210,11 +210,11 @@ class TestVariants:
 
 class TestEnvOverride:
     def test_kv_buckets_override(self, monkeypatch):
-        """Kept verbatim: the top entry already covers max_model_len=2048."""
-        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,512,4096")
+        """Kept verbatim: the top entry is exactly max_model_len=2048."""
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,512,2048")
         envs.clear_env_cache()
         b = SpyreAttnBucketer(make_config())
-        assert b.kv_buckets == [128, 512, 4096]
+        assert b.kv_buckets == [128, 512, 2048]
 
     def test_query_buckets_override_is_sorted_and_deduped(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_QUERY_BUCKETS", "64,1,16,64")
@@ -237,12 +237,18 @@ class TestEnvOverride:
         assert b.query_buckets == [1, 16, 512]
         assert b.find_query_bucket(512) == 512
 
-    def test_override_above_the_limit_is_left_alone(self, monkeypatch):
-        """Entries past the limit are unreachable, not wrong; don't prune them."""
+    def test_override_above_the_limit_is_dropped(self, monkeypatch):
+        """Entries past the limit are unreachable; drop them and cover the limit."""
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,8192")
         envs.clear_env_cache()
         b = SpyreAttnBucketer(make_config(max_model_len=2048))
-        assert b.kv_buckets == [128, 8192]
+        assert b.kv_buckets == [128, 2048]
+
+    def test_override_entirely_above_the_limit_keeps_only_the_limit(self, monkeypatch):
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "4096,8192")
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=2048))
+        assert b.kv_buckets == [2048]
 
     def test_covers_every_in_contract_length_under_a_short_override(self, monkeypatch):
         """The point of the top-up: no in-contract batch falls off either axis."""
