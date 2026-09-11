@@ -1,5 +1,19 @@
 #!/bin/bash
 
+# =============================================================================
+# COMMAND-LINE FLAGS
+#
+#   bash scripts/run_benchmarks.sh [--no-overwrite] [--disable-caching]
+#
+#   --no-overwrite    Keep existing result folders: write to <name>_1, <name>_2,
+#                     ... instead of deleting and recreating <name>.
+#   --disable-caching Run the server with SPYRE_KERNEL_CACHE=0 instead of the
+#                     default 1. Note the folder name does not encode this, so a
+#                     cached and an uncached run of the same config overwrite
+#                     each other unless you also pass --no-overwrite.
+#
+# =============================================================================
+
 echo "Start running experiments"
 
 # =============================================================================
@@ -71,10 +85,14 @@ param_sets=(
 
 # Parse command line arguments
 NO_OVERWRITE=false
+KERNEL_CACHE=1
 for arg in "$@"; do
     if [ "$arg" == "--no-overwrite" ]; then
         NO_OVERWRITE=true
         echo "Running with --no-overwrite: will create incremented folders instead of overwriting"
+    elif [ "$arg" == "--disable-caching" ]; then
+        KERNEL_CACHE=0
+        echo "Running with --disable-caching: SPYRE_KERNEL_CACHE=0"
     fi
 done
 
@@ -226,7 +244,7 @@ for param_set in "${param_sets[@]}"; do
     fi
 
     echo -e "
-    export SPYRE_KERNEL_CACHE=1
+    export SPYRE_KERNEL_CACHE=$KERNEL_CACHE
 
     vllm serve $model
         --max-model-len $max_context_len
@@ -236,7 +254,7 @@ for param_set in "${param_sets[@]}"; do
         $prefix_caching_arg > ${experiments_results}/serving_output.txt 2>&1
     " > ${experiments_results}/serving_output.txt
 
-    export SPYRE_KERNEL_CACHE=1
+    export SPYRE_KERNEL_CACHE=$KERNEL_CACHE
     vllm serve $model \
         --max-model-len $max_context_len \
         --max-num-seqs $batch_size \
