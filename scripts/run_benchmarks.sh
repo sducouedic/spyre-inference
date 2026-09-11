@@ -48,15 +48,19 @@ echo "Start running experiments"
 #                     (optional, default $default_tp_size)
 #   num_blocks        KV cache blocks (--num-gpu-blocks-override).
 #                     (optional, default $default_num_blocks)
+#   commit            e.g. commit=2aaab14 
+#                     Git commit to check out before running this experiment.
+#                     None (or omitted) = stay on the current checkout.
+#                     The working tree must be clean (untracked files are fine).
 #
 # The single line below is the GOLDEN BENCHMARK -- this is the configuration we 
 # use to benchmark spyre-inference
 # =============================================================================
 param_sets=(
-    # useful for populating the cache and do a test run
-    "bench=aiops num_prompts=10 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
+    # 10 prompts: useful for populating the cache and doing a test run
+    "commit=None bench=aiops num_prompts=10 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
     # GOLDEN BENCHMARK
-    "bench=aiops num_prompts=200 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
+    "commit=None bench=aiops num_prompts=200 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
 )
 
 # Parse command line arguments
@@ -109,7 +113,7 @@ bench_files["all"]="/models/online_benchmarking_data_reordered/all_sequences_int
 for param_set in "${param_sets[@]}"; do
 
     # clear optional params so values don't leak across param sets
-    unset tp_size custom_output_len num_blocks
+    unset tp_size custom_output_len num_blocks commit
 
     # retrieve config params
     eval "$param_set"
@@ -130,7 +134,34 @@ for param_set in "${param_sets[@]}"; do
         num_blocks=$default_num_blocks
     fi
 
-    experiments_results_base=${results_folder}/${bench}_${num_prompts}_${max_context_len}_bs${batch_size}_conc${concurrency}_chunksize${chunk_size}_pc${prefix_caching}_shuffle${shuffle}_ignoreeos${ignore_eos}_olen${custom_output_len}_tp${tp_size}_nblocks${num_blocks}
+    commit_suffix=""
+    if [ -n "$commit" ] && [ "$commit" != "None" ]; then
+        # refuse to check out over uncommitted tracked changes; this script
+        # itself is exempt, since it is the one driving the checkout
+        self_path=$(git ls-files --full-name "$BASH_SOURCE")
+        dirty=$(git status --porcelain --untracked-files=no | grep -v " ${self_path}\$")
+        if [ -n "$dirty" ]; then
+            echo "Uncommitted changes present, refusing to check out $commit:"
+            echo "$dirty"
+            exit 1
+        fi
+        echo "Checking out commit $commit"
+        # carry this script's own edits across the checkout
+        self_backup=$(mktemp)
+        cp "$BASH_SOURCE" "$self_backup"
+        git checkout -- "$self_path"
+        if ! git checkout "$commit"; then
+            cp "$self_backup" "$self_path"
+            rm -f "$self_backup"
+            echo "Failed to check out $commit. Skipping this experiment."
+            continue
+        fi
+        cp "$self_backup" "$self_path"
+        rm -f "$self_backup"
+        commit_suffix="_$(git rev-parse --short HEAD)"
+    fi
+
+    experiments_results_base=${results_folder}/${bench}_${num_prompts}_${max_context_len}_bs${batch_size}_conc${concurrency}_chunksize${chunk_size}_pc${prefix_caching}_shuffle${shuffle}_ignoreeos${ignore_eos}_olen${custom_output_len}_tp${tp_size}_nblocks${num_blocks}${commit_suffix}
 
     # Handle existing directory based on NO_OVERWRITE flag
     experiments_results=$experiments_results_base
