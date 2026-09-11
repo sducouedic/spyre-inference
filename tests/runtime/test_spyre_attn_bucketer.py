@@ -202,8 +202,6 @@ class TestVariants:
         assert b.num_seqs_buckets == [1, 2, 4, 6]
 
     def test_num_blocks_buckets_follow_the_kv_buckets(self, monkeypatch):
-        """A kv override moves the ladder the attention impl dispatches onto, so the
-        impl cannot land on a low block count that warmup never recorded."""
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "512,1024,2048")
         envs.clear_env_cache()
         b = SpyreAttnBucketer(make_config())
@@ -327,3 +325,29 @@ class TestBuilderAttnBucketer:
         bucketer = SpyreAttnBucketer(make_config())
         runner = self._runner([None, bucketer])
         assert runner._resolve_builder_attn_bucketer() is bucketer
+
+    def test_batched_decode_dispatches_onto_a_recorded_block_count(
+        self, monkeypatch, default_vllm_config
+    ):
+        """The regression this guards: ``build()`` and warmup must agree."""
+        from tests.attention.test_spyre_attn import _padded_mask_metadata
+
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "512,1024,2048")
+        monkeypatch.setenv("SPYRE_BATCHED_DECODE", "1")
+        envs.clear_env_cache()
+
+        from vllm.config import get_current_vllm_config
+
+        # block_size pinned to match what _padded_mask_metadata builds with, so
+        # the override resolves onto the same block counts build() produces.
+        vllm_config = get_current_vllm_config()
+        vllm_config.cache_config.block_size = BLOCK_SIZE
+        bucketer = SpyreAttnBucketer(vllm_config)
+
+        # 4 blocks of real KV, and enough sequences to clear _MIN_BATCHED_SEQS.
+        metadata = _padded_mask_metadata(
+            [(1, 4 * BLOCK_SIZE)] * 4, max_num_blocks=bucketer.num_blocks_buckets[-1]
+        )
+
+        assert metadata.padded_batch_blocks in bucketer.num_blocks_buckets
+        assert metadata.padded_num_seqs in bucketer.num_seqs_buckets
