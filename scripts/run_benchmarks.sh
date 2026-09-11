@@ -27,7 +27,8 @@ echo "Start running experiments"
 # same config overwrites it, unless you pass --no-overwrite (then it creates
 # ..._1, ..._2, ... alongside).
 #
-# PARAMS (all are per-experiment; the last three may be omitted to use defaults)
+# PARAMS (all are per-experiment; any param documented with a default below may
+# be omitted from a param_sets line, and can still be overridden there)
 #
 #   bench             Which dataset to run. One of the bench_files keys defined
 #                     further down: cics, db2, ims, aiops, tls, all.
@@ -37,13 +38,18 @@ echo "Start running experiments"
 #   concurrency       Client-side max in-flight requests (--max-concurrency).
 #                     Usually set equal to batch_size.
 #   chunk_size        Server-side prefill chunk (--max-num-batched-tokens).
+#                     (optional, default $default_chunk_size)
 #   prefix_caching    1 = --enable-prefix-caching, 0 = --no-enable-prefix-caching.
+#                     (optional, default $default_prefix_caching)
 #   shuffle           1 = shuffle the dataset order, 0 = keep dataset order
 #                     (0 passes --disable-shuffle).
+#                     (optional, default $default_shuffle)
 #   ignore_eos        1 = --ignore-eos, so generation always runs to the full
 #                     output length instead of stopping at EOS. 0 = honor EOS.
+#                     (optional, default $default_ignore_eos)
 #   custom_output_len Force this many output tokens per request. -1 = use the
-#                     output lengths recorded in the dataset. (optional, default -1)
+#                     output lengths recorded in the dataset.
+#                     (optional, default $default_custom_output_len)
 #   tp_size           Tensor parallel size (--tensor-parallel-size).
 #                     (optional, default $default_tp_size)
 #   num_blocks        KV cache blocks (--num-gpu-blocks-override).
@@ -58,9 +64,9 @@ echo "Start running experiments"
 # =============================================================================
 param_sets=(
     # 10 prompts: useful for populating the cache and doing a test run
-    "commit=None bench=aiops num_prompts=10 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
+    "commit=None bench=aiops num_prompts=10 batch_size=4 max_context_len=8192 concurrency=4 tp_size=1 num_blocks=2049"
     # GOLDEN BENCHMARK
-    "commit=None bench=aiops num_prompts=200 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
+    "commit=None bench=aiops num_prompts=200 batch_size=4 max_context_len=8192 concurrency=4 tp_size=1 num_blocks=2049"
 )
 
 # Parse command line arguments
@@ -87,6 +93,11 @@ model=ibm-granite/granite-3.3-8b-instruct
 
 results_folder=results/
 result_filename=result.json
+default_chunk_size=512
+default_prefix_caching=1
+default_shuffle=0
+default_ignore_eos=1
+default_custom_output_len=-1
 default_tp_size=1
 default_num_blocks=2049
 timeout=7200 # wait for up to two hours for the server to get ready
@@ -113,26 +124,20 @@ bench_files["all"]="/models/online_benchmarking_data_reordered/all_sequences_int
 for param_set in "${param_sets[@]}"; do
 
     # clear optional params so values don't leak across param sets
-    unset tp_size custom_output_len num_blocks commit
+    unset chunk_size prefix_caching shuffle ignore_eos custom_output_len
+    unset tp_size num_blocks commit
 
     # retrieve config params
     eval "$param_set"
     bench_file=${bench_files[$bench]}
 
-    # Use tp_size from param_set if provided, otherwise fall back to the default
-    if [ -z "$tp_size" ]; then
-        tp_size=$default_tp_size
-    fi
-
-    # Use custom_output_len from param_set if provided, otherwise default to -1
-    if [ -z "$custom_output_len" ]; then
-        custom_output_len="-1"
-    fi
-
-    # Use num_blocks from param_set if provided, otherwise fall back to the default
-    if [ -z "$num_blocks" ]; then
-        num_blocks=$default_num_blocks
-    fi
+    # fall back to the defaults for any optional param the param_set omitted
+    for opt in chunk_size prefix_caching shuffle ignore_eos custom_output_len \
+               tp_size num_blocks; do
+        if [ -z "${!opt}" ]; then
+            eval "$opt=\$default_$opt"
+        fi
+    done
 
     commit_suffix=""
     if [ -n "$commit" ] && [ "$commit" != "None" ]; then
