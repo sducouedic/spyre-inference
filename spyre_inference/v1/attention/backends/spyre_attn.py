@@ -44,8 +44,10 @@ from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     _MIN_BATCHED_SEQS,
+    SpyreAttnBatchedDecodeBucket,
     SpyreAttnBucket,
     SpyreAttnBucketer,
+    batched_decode_chunking,
 )
 
 logger = init_logger(__name__)
@@ -90,8 +92,6 @@ def _record_block(name: str):
 # padded to this width so each row starts on a stick boundary; see
 # SpyreAttentionMetadata.page_index_tables.
 INT32_ELEMS_PER_STICK = 32
-
-_SPYRE_CORE_COUNT = 32
 
 
 class SpyrePagedKVCache(NamedTuple):
@@ -1055,14 +1055,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
 
             if b_seqs is not None and b_blocks is not None:
                 padded_num_seqs = b_seqs
-                # Entries target the cores: fewer under-fills them, more than one
-                # stick's worth hits a backend axis-merge limit.
-                blocks_per_chunk = max(1, min(_SPYRE_CORE_COUNT // b_seqs, b_blocks))
-                # blocks_per_chunk need not divide b_blocks, so pad the block axis
-                # up to a whole chunk. Padding columns gather page 0 under an
+                # Shared with the warmup recorder, so a dispatch here reaches a
+                # variant it traced. Padding columns gather page 0 under an
                 # all--inf mask and contribute zero; chunk 0 still holds every real
                 # row's block 0, so the running max stays finite.
-                num_chunks = (b_blocks + blocks_per_chunk - 1) // blocks_per_chunk
+                blocks_per_chunk, num_chunks = batched_decode_chunking(b_seqs, b_blocks)
                 padded_batch_blocks = num_chunks * blocks_per_chunk
                 assert padded_batch_blocks >= b_blocks
                 entries = b_seqs * blocks_per_chunk
