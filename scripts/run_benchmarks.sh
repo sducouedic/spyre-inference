@@ -53,7 +53,9 @@ echo "Start running experiments"
 # use to benchmark spyre-inference
 # =============================================================================
 param_sets=(
-    # GOLDEN BENCHMARK -- leave this line as-is.
+    # useful for populating the cache and do a test run
+    "bench=aiops num_prompts=10 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
+    # GOLDEN BENCHMARK
     "bench=aiops num_prompts=200 batch_size=4 max_context_len=8192 concurrency=4 chunk_size=512 prefix_caching=1 shuffle=0 ignore_eos=1 custom_output_len=-1 tp_size=1 num_blocks=2049"
 )
 
