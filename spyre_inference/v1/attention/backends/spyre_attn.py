@@ -43,6 +43,7 @@ from spyre_inference import envs
 from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
+    _MIN_BATCHED_SEQS,
     SpyreAttnBucket,
     SpyreAttnBucketer,
 )
@@ -89,11 +90,6 @@ def _record_block(name: str):
 # padded to this width so each row starts on a stick boundary; see
 # SpyreAttentionMetadata.page_index_tables.
 INT32_ELEMS_PER_STICK = 32
-
-
-# Batches below this fall back to the per-seq loop: the batched matmul's
-# padded-row overhead exceeds the per-seq cost at small N.
-_MIN_BATCHED_SEQS = 4
 
 
 def _find_bucket(n: int, buckets: tuple[int, ...]) -> int | None:
@@ -644,9 +640,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # rather than constructing a second one that could drift.
         self._attn_bucketer = SpyreAttnBucketer(vllm_config)
 
-        self._num_seqs_buckets: tuple[int, ...] = tuple(self._attn_bucketer.num_seqs_buckets)
-        self._num_blocks_buckets: tuple[int, ...] = tuple(self._attn_bucketer.num_blocks_buckets)
-
     def _get_zero_tile(self, aligned_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
 
@@ -1037,8 +1030,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # real_num_blocks is empty and the tiles are the unpadded active
             # blocks, so num_active is already the real count.
             blocks_per_seq = real_num_blocks if active_block_indices is None else num_active
-            b_seqs = _find_bucket(num_seqs, self._num_seqs_buckets)
-            b_blocks = _find_bucket(max(blocks_per_seq), self._num_blocks_buckets)
+
+            b_seqs = SpyreAttnBucketer._round_up(num_seqs, self._attn_bucketer._num_seqs_buckets)
+            b_blocks = SpyreAttnBucketer._round_up(
+                max(blocks_per_seq), self._attn_bucketer._num_blocks_buckets
+            )
+
             if b_seqs is not None and b_blocks is not None:
                 padded_num_seqs = b_seqs
                 padded_batch_blocks = b_blocks
