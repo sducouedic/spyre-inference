@@ -15,12 +15,13 @@
 
 """Write a components.txt describing the Spyre RPMs actually extracted in CI.
 
-torch-spyre keys its kernel cache on the ibm-deeptools and ibm-flex versions
-read from LIB_VERSION_FILE, so that file has to describe the RPMs CI installed
-rather than the ones baked into the image.
+torch-spyre keys its kernel cache on library versions read from
+LIB_VERSION_FILE, so that file has to describe the RPMs CI installed rather than
+the ones baked into the image.
 
-Versions come from the extracted RPM filenames, not the lock: the lock wildcards
-the build number on ppc64le/s390x (`_*`).
+Packages come from spyre-rpms.lock; versions come from the extracted RPM
+filenames, not the lock, because the lock wildcards the build number on
+ppc64le/s390x (`_*`).
 """
 
 from __future__ import annotations
@@ -30,14 +31,9 @@ import os
 import re
 import sys
 
-# Mirrors the image's components.txt
-COMPONENTS = (
-    "ibm-deeptools",
-    "ibm-senlib-core",
-    "ibm-senlib-dd2",
-    "ibm-flex",
-    "ibm-aiu-toolbox-e2e",
-)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from resolve_rpms import DEFAULT_LOCK, load_data, package_names  # noqa: E402
 
 
 def _version_from_filename(filename: str, name: str, arch: str) -> str | None:
@@ -50,6 +46,7 @@ def main() -> None:
     p.add_argument("--rpm-dir", required=True, help="directory holding the cached RPMs")
     p.add_argument("--arch", required=True, help="RPM arch suffix, e.g. x86_64")
     p.add_argument("--output", required=True, help="components.txt path to write")
+    p.add_argument("--lock", default=DEFAULT_LOCK, help="path to spyre-rpms.lock")
     p.add_argument(
         "--merge",
         action="store_true",
@@ -57,13 +54,17 @@ def main() -> None:
     )
     args = p.parse_args()
 
+    components = package_names(load_data(args.lock))
+    if not components:
+        sys.exit(f"::error::no [packages] entries in {args.lock!r}.")
+
     try:
         entries = os.listdir(args.rpm_dir)
     except FileNotFoundError:
         sys.exit(f"::error::RPM directory not found: {args.rpm_dir!r}")
 
     resolved = {}
-    for name in COMPONENTS:
+    for name in components:
         # `-[0-9]` so ibm-deeptools does not also match ibm-deeptools-devel.
         for entry in sorted(entries):
             if not re.match(rf"{re.escape(name)}-[0-9]", entry):
@@ -94,15 +95,15 @@ def main() -> None:
             )
             return
         existing.update(resolved)
-        lines = [f"{n}:{existing[n]}" for n in COMPONENTS if n in existing]
+        lines = [f"{n}:{existing[n]}" for n in components if n in existing]
     else:
-        missing = [n for n in COMPONENTS if n not in resolved]
+        missing = [n for n in components if n not in resolved]
         if missing:
             sys.exit(
                 f"::error::no extracted RPM found for {', '.join(missing)} "
                 f"(arch {args.arch}) in {args.rpm_dir!r}; cannot write components.txt."
             )
-        lines = [f"{n}:{resolved[n]}" for n in COMPONENTS]
+        lines = [f"{n}:{resolved[n]}" for n in components]
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
