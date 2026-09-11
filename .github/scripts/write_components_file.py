@@ -30,8 +30,7 @@ import os
 import re
 import sys
 
-# Mirrors the image's components.txt; only deeptools and flex feed the cache key,
-# the rest keep the file's shape.
+# Mirrors the image's components.txt
 COMPONENTS = (
     "ibm-deeptools",
     "ibm-senlib-core",
