@@ -64,6 +64,12 @@ def parse_args():
         dest="enforce_eager",
         help="Skip torch.compile (whole model and attention kernel), run in eager mode",
     )
+    parser.add_argument(
+        "--no-compile-sizes",
+        action="store_true",
+        dest="no_compile_sizes",
+        help="Compile without 1D body token buckets, disabling the shape bucketer",
+    )
     return parser.parse_args()
 
 
@@ -137,6 +143,7 @@ def main():
         dtype="float16",
         enforce_eager=args.enforce_eager,
         num_gpu_blocks_override=args.num_gpu_blocks_override,
+        compilation_config={"compile_sizes": []} if args.no_compile_sizes else None,
     )
 
     # When compiling, run an untimed warmup pass first so any lazy per-shape
