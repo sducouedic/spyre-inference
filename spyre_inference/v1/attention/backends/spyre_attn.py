@@ -43,7 +43,7 @@ from spyre_inference import envs
 from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.ops.batched_decode import batched_decode_kernel
-from spyre_inference.v1.attention.ops.layout import INT32_ELEMS_PER_STICK, stick_aligned_len
+from spyre_inference.v1.attention.ops.layout import INT32_ELEMS_PER_STICK
 from spyre_inference.v1.attention.ops.page_attn import page_attn_kernel
 from spyre_inference.v1.attention.ops.reshape_and_cache import reshape_and_cache_kernel
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
@@ -160,10 +160,8 @@ def _build_query_row_tables(
     tables = []
     for s, aligned in enumerate(aligned_query_lens):
         # Width the recorder traced for this query length, not the batch max.
-        index_len = stick_aligned_len(aligned)
-        row = torch.zeros(index_len, dtype=torch.int32)
         last_real = max(int(lens[s]) - 1, 0)
-        row[:aligned] = (starts[s] + torch.arange(aligned).clamp(max=last_real)).to(torch.int32)
+        row = (starts[s] + torch.arange(aligned).clamp(max=last_real)).to(torch.int32)
         tables.append(convert(row, device=device))
     return tables
 
