@@ -258,8 +258,8 @@ class TorchSpyrePlatform(CpuPlatform):
 
             # Body: 1D compile_sizes (packed token counts). Attention (B, L)
             # is independent — see SpyreEncoderAttentionImpl gather-pack.
-            # Honor a user-set list (#638); otherwise generate defaults. An
-            # explicit empty list opts out of bucketing entirely
+            # Honor a user-set list (#638), including an empty one to opt out
+            # of bucketing; otherwise generate defaults.
             if vllm_config.compilation_config.compile_sizes is not None:
                 compile_sizes = vllm_config.compilation_config.compile_sizes
             else:
