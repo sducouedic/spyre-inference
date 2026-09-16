@@ -2,7 +2,7 @@
 name: vllm-bench-latency
 description: Run `vllm bench latency` for a user-specified model on Spyre from within this checkout, then report avg latency + percentiles. If the user asks to compare, re-run the identical benchmark on `main` (via a throwaway git worktree, non-destructive to the working tree) and print a side-by-side comparison. Use when the user wants Spyre latency numbers for a model, or wants to see how the current branch's latency compares to main. Assumes you are already on the Spyre host with spyre-inference installed editable.
 user-invocable: true
-argument-hint: "<model> [--compare-main] [--input-len N] [--output-len N] [--batch-size N] [--max-model-len N] [--num-iters N] [--num-iters-warmup N] [--enforce-eager]"
+argument-hint: "<model> [--compare-main] [--input-len N] [--output-len N] [--batch-size N] [--max-model-len N] [--num-iters N] [--enforce-eager]"
 ---
 
 # Latency benchmark on Spyre
@@ -23,7 +23,7 @@ Run `vllm bench latency` for a model the user names against **this** `spyre-infe
 
 - **`<model>`** (required): HF model id or locally-cached path. If omitted, default to `ibm-granite/granite-3.3-8b-instruct` and say so in the report.
 - **`--compare-main`**: after the current-branch run, run the **identical** benchmark on local `main` and print a comparison. Only when the user asks to compare.
-- Benchmark params (optional; defaults in parens): `--input-len` (64), `--output-len` (64), `--batch-size` (1), `--max-model-len` (128), `--num-iters` (10), `--num-iters-warmup` (2).
+- Benchmark params (optional; defaults in parens): `--input-len` (64), `--output-len` (64), `--batch-size` (1), `--max-model-len` (128), `--num-iters` (10).
 - **`--enforce-eager`**: benchmark the uncompiled path. Only pass it if the user asks — compiled (`STOCK_TORCH_COMPILE`) is the platform default.
 
 ## Steps
@@ -70,8 +70,6 @@ Derive the list from the config, don't copy it. `bs=1`, `in64/out64/max128`: dec
 
 Also pass `--no-enable-prefix-caching`: with it on, timed iterations hit the cache the warmup iterations filled, so `num_computed_tokens` differs, the prefill chunks come out a different size, and that new shape re-records *inside* the measured window.
 
-**Warm the shape you measure.** `--num-iters-warmup ≥ 2` for `bench latency`; for `bench serve`, `--num-warmups` must be at least `--max-concurrency` so the first fully-concurrent wave is not itself the warmup.
-
 Report `Warmup complete in <N>s for <M> buckets` from the log so the compile saving is visible.
 
 ### 1. Run the benchmark (current branch)
@@ -80,7 +78,7 @@ Fix the params in one block so a compare run is identical, then run and read bac
 
 ```bash
 MODEL="<model>"; INPUT_LEN=64; OUTPUT_LEN=64; BATCH_SIZE=1
-MAX_LEN=128; ITERS=10; WARMUP=2; EAGER=""   # EAGER="--enforce-eager" only if asked
+MAX_LEN=128; ITERS=10; EAGER=""   # EAGER="--enforce-eager" only if asked
 TAG=branch
 OUT=.claude/skills/vllm-bench-latency/logs; mkdir -p "$OUT"   # artifacts live here, not the repo root
 export SPYRE_NUM_CPUS=8
@@ -88,7 +86,7 @@ export SPYRE_NUM_CPUS=8
 uv run --no-sync vllm bench latency \
   --model "$MODEL" \
   --input-len $INPUT_LEN --output-len $OUTPUT_LEN --batch-size $BATCH_SIZE \
-  --num-iters-warmup $WARMUP --num-iters $ITERS --max-model-len $MAX_LEN \
+  --num-iters $ITERS --max-model-len $MAX_LEN \
   -cc.compile_sizes="$CSIZES" --no-enable-prefix-caching \
   $EAGER \
   --output-json "$OUT/latency_${TAG}.json" 2>&1 | tee "$OUT/latency_${TAG}.log"
@@ -111,7 +109,7 @@ export SPYRE_NUM_CPUS=8
 uv run --no-sync vllm bench latency \
   --model "$MODEL" \
   --input-len $INPUT_LEN --output-len $OUTPUT_LEN --batch-size $BATCH_SIZE \
-  --num-iters-warmup $WARMUP --num-iters $ITERS --max-model-len $MAX_LEN \
+  --num-iters $ITERS --max-model-len $MAX_LEN \
   -cc.compile_sizes="$CSIZES" --no-enable-prefix-caching \
   $EAGER \
   --output-json "$OUT/latency_${TAG}.json" 2>&1 | tee "$OUT/latency_${TAG}.log"
@@ -144,7 +142,7 @@ Then report the model + exact params, and numbers from the JSON:
 - **Compare mode**: a small table (branch vs main) of avg latency + key percentiles, the absolute and % change (`(branch − main) / main × 100`), and which is faster. Label each column with its branch/sha.
 
 ```text
-model: <model>   params: in<N>/out<N>/bs<N>/max<N>/iters<N>/warmup<N>/<compiled|eager>
+model: <model>   params: in<N>/out<N>/bs<N>/max<N>/iters<N>/<compiled|eager>
                         main (<sha>)   <branch> (<sha>)   Δ
 avg latency (s)         <a>            <b>                <b−a>  (<pct>%, <faster/slower>)
 p50 (s)                 <a>            <b>                <b−a>
