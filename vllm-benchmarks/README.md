@@ -9,6 +9,10 @@ test entries; one entry per `(model, shape)`:
 - `serve-tests.yaml` → `vllm bench serve` (starts a server, waits for health,
   then benchmarks against it)
 
+Serve entries come in two flavours. `*_in64_out64` sends random prompts at a fixed 64-in/64-out shape — cheap, and the right smoke test. `*_4k` replays a recorded agentic trace instead, served with `max-model-len: 4096`: real router prompts, each request keeping the output length it actually produced, replayed in recorded order so prefix-cache behaviour is reproducible. Use the latter for performance numbers; the fixed shape cannot show prefill chunking, prefix reuse, or KV-block pressure.
+
+The trace path is the `SPYRE_AIOPS_DATASET` environment variable, so each host can point it at its own copy. Unset, it falls back to the location on the Spyre benchmark hosts. Where the file is not present, the runner skips the `*_4k` entries with a warning instead of failing.
+
 ## Running locally
 
 Benchmarks run through the `perf-tests` Make target. Two optional filters:
