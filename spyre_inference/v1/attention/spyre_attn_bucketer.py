@@ -185,9 +185,7 @@ class SpyreAttnBucketer:
             )
 
         # Default: powers of two from _MIN_BATCHED_SEQS up to max_num_seqs, the
-        # batch sizes the batched decode kernel can be asked for. Empty below
-        # _MIN_BATCHED_SEQS, where build() declines the batched path for every
-        # bucket.
+        # batch sizes the batched decode kernel can be asked for.
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self._num_seqs_buckets: list[int] = (
             _resolve_buckets(
