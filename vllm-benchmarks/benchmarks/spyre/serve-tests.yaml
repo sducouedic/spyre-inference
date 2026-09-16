@@ -19,8 +19,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -45,8 +43,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -71,8 +67,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -96,7 +90,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -121,7 +114,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -146,7 +138,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -170,7 +161,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -195,7 +185,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -220,7 +209,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -244,7 +232,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -269,7 +256,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -294,7 +280,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -318,7 +303,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -343,7 +327,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -368,7 +351,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -395,7 +377,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -420,7 +401,6 @@
     input-len: 64
     output-len: 64
     num-prompts: 16
-    num-warmups: 8
     # Match max-num-seqs and burst so the batch fills without queueing.
     max-concurrency: 4
     request-rate: inf
@@ -470,8 +450,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -509,8 +487,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -548,8 +524,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -586,8 +560,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -625,8 +597,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -664,8 +634,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -702,8 +670,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -740,8 +706,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_CICS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -778,8 +742,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_ALL_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -817,8 +779,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -856,8 +816,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -894,8 +852,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -933,8 +889,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -972,8 +926,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -1010,8 +962,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -1049,8 +999,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -1088,8 +1036,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -1127,8 +1073,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
@@ -1166,8 +1110,6 @@
     dataset-name: custom
     dataset-path: ${SPYRE_AIOPS_DATASET}
     num-prompts: 100
-    # Warmup requests excluded from metrics (first requests pay per-shape compile).
-    num-warmups: 8
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
     ignore-eos: true
