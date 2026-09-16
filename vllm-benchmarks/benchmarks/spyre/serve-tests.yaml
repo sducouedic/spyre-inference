@@ -420,10 +420,9 @@
 # the prefix-cache hit rate reproducible.
 #
 # dataset-path is an environment variable so each host can point it at its own
-# copy of the trace: ${SPYRE_AIOPS_DATASET} for the AIOps trace (_4k entries),
-# ${SPYRE_CICS_DATASET} for the CICS trace (_8k entries) and ${SPYRE_ALL_DATASET}
-# for the interleaved all-agent trace (_32k entries); each trace's first 100
-# requests need its entry's context. run_vllm_benchmarks.py expands them, falling
+# copy of the trace: ${SPYRE_AIOPS_DATASET} for the AIOps trace (_4k entries)
+# and ${SPYRE_CICS_DATASET} for the CICS trace (_8k entries), whose first 100
+# requests need the larger context. run_vllm_benchmarks.py expands them, falling
 # back to the paths on the Spyre benchmark hosts, and skips entries with a
 # warning where the file is not present.
 # ---------------------------------------------------------------------------
@@ -705,42 +704,6 @@
     model: ibm-granite/granite-4.1-8b
     dataset-name: custom
     dataset-path: ${SPYRE_CICS_DATASET}
-    num-prompts: 100
-    # Keep each record's own output_tokens rather than forcing a fixed length.
-    custom-output-len: -1
-    ignore-eos: true
-    # Replay the recorded order so prefix-cache behaviour is reproducible.
-    disable-shuffle: true
-    # Prompts already carry their chat template from the trace.
-    skip-chat-template: true
-    endpoint: /v1/completions
-    percentile-metrics: ttft,tpot,itl,e2el
-    metric-percentiles: 99,100
-    # Match max-num-seqs and burst so the batch fills without queueing.
-    max-concurrency: 4
-    request-rate: inf
-
-- test_name: serve_granite41-8b_tp1_32k
-  server_health_timeout: 1800
-  environment_variables:
-    VLLM_CPU_KVCACHE_SPACE: 64
-    DTLOG_LEVEL: error
-    SPYRE_DEVICES: '0'
-    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '1800'
-    SPYRE_BATCHED_DECODE: '1'
-  server_parameters:
-    model: ibm-granite/granite-4.1-8b
-    dtype: float16
-    load-format: auto
-    max-num-seqs: 4
-    # The first 100 trace requests stay under 32768 tokens (prompt + output); longer requests are rejected.
-    max-model-len: 32768
-    max-num-batched-tokens: 512
-    enable-prefix-caching: true
-  parameters:
-    model: ibm-granite/granite-4.1-8b
-    dataset-name: custom
-    dataset-path: ${SPYRE_ALL_DATASET}
     num-prompts: 100
     # Keep each record's own output_tokens rather than forcing a fixed length.
     custom-output-len: -1
