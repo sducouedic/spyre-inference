@@ -48,6 +48,10 @@ DATASET_PATH_DEFAULTS = {
         "/models/online_benchmarking_data_reordered/"
         "aiops_results_2025.11.03_e2ee1b0_correct_order.jsonl"
     ),
+    "SPYRE_CICS_DATASET": (
+        "/models/online_benchmarking_data_reordered/"
+        "cics_results_2025.11.03_e2ee1b0_correct_order.jsonl"
+    ),
 }
 
 
