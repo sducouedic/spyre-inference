@@ -131,9 +131,9 @@ def build_env_vars(env_config: dict) -> dict[str, str]:
     return env_vars
 
 
-# Invoke the vLLM CLI directly: the dynamo recompile-limit raise the benchmarks
-# need is applied by the platform plugin at import (see
-# spyre_inference/platform.py::_raise_dynamo_recompile_limits, torch-spyre #444).
+# Equivalent to the `vllm` console script, but run through sys.executable so the
+# CLI always uses this interpreter's environment instead of whatever `vllm` PATH
+# resolves to.
 VLLM_CLI = [sys.executable, "-m", "vllm.entrypoints.cli.main"]
 
 
