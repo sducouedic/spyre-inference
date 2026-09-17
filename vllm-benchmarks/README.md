@@ -15,10 +15,14 @@ Trace paths are environment variables, so each host can point them at its own co
 
 ## Running locally
 
-Benchmarks run through the `perf-tests` Make target. Two optional filters:
+Benchmarks run through the `perf-tests` Make target. Three optional filters, all combinable:
 
 - `MODELS` — comma-separated model names (matched case-insensitively). Empty =
   all models.
+- `TESTS` — comma-separated substrings matched against each entry's `test_name`
+  (case-insensitively); an entry runs if it matches any of them. Since names are
+  `<type>_<model>_<tp>_<shape>`, one substring can select a whole axis: `tp2`,
+  `_4k`, `fp8`. Empty = all entries.
 - `BENCH_TYPES` — comma-separated subset of `latency,throughput,serve`. Empty =
   all types.
 
@@ -30,4 +34,10 @@ make perf-tests RESULTS_DIR=benchmark-results
 make perf-tests RESULTS_DIR=benchmark-results \
   MODELS=ibm-granite/granite-3.3-8b-instruct \
   BENCH_TYPES=serve
+
+# One exact experiment
+make perf-tests RESULTS_DIR=benchmark-results TESTS=serve_granite41-8b_tp1_8k
+
+# Every TP2 4k trace replay, whatever the model
+make perf-tests RESULTS_DIR=benchmark-results TESTS=tp2_4k
 ```

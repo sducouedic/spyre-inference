@@ -89,6 +89,13 @@ def parse_args():
         "case-insensitively against each config's model",
     )
     parser.add_argument(
+        "--tests",
+        type=str,
+        default="",
+        help="comma-separated substrings to match against each config's test_name "
+        "(empty = all); a config runs if it matches any of them, case-insensitively",
+    )
+    parser.add_argument(
         "--bench-types",
         type=str,
         default="",
@@ -130,14 +137,22 @@ def _missing_dataset(config: dict) -> str | None:
     return None
 
 
-def _select_configs(configs: list, models: set[str]) -> list:
-    """Keep configs whose model is selected (empty `models` = all) and whose
-    dataset, if any, exists on this host."""
+def _select_configs(configs: list, models: set[str], tests: set[str]) -> list:
+    """Keep configs whose model and test_name are selected (an empty filter set
+    selects all) and whose dataset, if any, exists on this host.
+
+    `tests` entries are substrings of test_name, so a filter can name a whole
+    axis of the matrix (`tp2`, `_4k`) rather than one full test name.
+    """
     selected = []
     for config in configs:
         model = _config_model(config)
         if models and not (model and model.lower() in models):
             log.info("Skipping %s (model %s not selected)", config.get("test_name"), model)
+            continue
+        test_name = str(config.get("test_name", ""))
+        if tests and not any(t in test_name.lower() for t in tests):
+            log.info("Skipping %s (test name not selected)", test_name)
             continue
         _resolve_dataset_path(config)
         missing = _missing_dataset(config)
@@ -227,6 +242,7 @@ def run_benchmarks_from_file(
     spyre_devices: str,
     aiu_world_size: str,
     models: set[str],
+    tests: set[str],
 ) -> tuple[int, int]:
     """Run all benchmarks from a config file. Returns (passed, failed) counts."""
     if not config_file.exists():
@@ -240,7 +256,7 @@ def run_benchmarks_from_file(
         log.error("%s is not a YAML list", config_file)
         return 0, 1
 
-    configs = _select_configs(configs, models)
+    configs = _select_configs(configs, models, tests)
 
     passed = 0
     failed = 0
@@ -378,6 +394,7 @@ def run_serve_benchmarks_from_file(
     spyre_devices: str,
     aiu_world_size: str,
     models: set[str],
+    tests: set[str],
 ) -> tuple[int, int]:
     """Run all serve benchmarks from a config file. Returns (passed, failed) counts."""
     if not config_file.exists():
@@ -391,7 +408,7 @@ def run_serve_benchmarks_from_file(
         log.error("%s is not a YAML list", config_file)
         return 0, 1
 
-    configs = _select_configs(configs, models)
+    configs = _select_configs(configs, models, tests)
 
     passed = 0
     failed = 0
@@ -432,6 +449,7 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
 
     models = {m.strip().lower() for m in args.models.split(",") if m.strip()}
+    tests = {t.strip().lower() for t in args.tests.split(",") if t.strip()}
     bench_types = {b.strip().lower() for b in args.bench_types.split(",") if b.strip()}
     unknown = bench_types - set(VALID_BENCH_TYPES)
     if unknown:
@@ -452,6 +470,7 @@ def main():
             spyre_devices=args.spyre_devices,
             aiu_world_size=args.aiu_world_size,
             models=models,
+            tests=tests,
         )
         total_passed += passed
         total_failed += failed
@@ -465,6 +484,7 @@ def main():
             spyre_devices=args.spyre_devices,
             aiu_world_size=args.aiu_world_size,
             models=models,
+            tests=tests,
         )
         total_passed += passed
         total_failed += failed
@@ -477,6 +497,7 @@ def main():
             spyre_devices=args.spyre_devices,
             aiu_world_size=args.aiu_world_size,
             models=models,
+            tests=tests,
         )
         total_passed += passed
         total_failed += failed
