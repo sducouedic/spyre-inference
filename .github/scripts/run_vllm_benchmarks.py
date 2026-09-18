@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import signal
+import string
 import subprocess
 import sys
 import time
@@ -38,6 +39,20 @@ log = logging.getLogger(__name__)
 
 # Valid environment variable name pattern
 ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
+
+# Dataset paths in the benchmark configs are written as environment variable
+# references so each host can point them at its own mount. Unset variables fall
+# back to the layout on the Spyre benchmark hosts.
+DATASET_PATH_DEFAULTS = {
+    "SPYRE_AIOPS_DATASET": (
+        "/models/online_benchmarking_data_reordered/"
+        "aiops_results_2025.11.03_e2ee1b0_correct_order.jsonl"
+    ),
+    "SPYRE_CICS_DATASET": (
+        "/models/online_benchmarking_data_reordered/"
+        "cics_results_2025.11.03_e2ee1b0_correct_order.jsonl"
+    ),
+}
 
 
 def parse_args():
@@ -91,17 +106,49 @@ def _config_model(config: dict) -> str | None:
     return None
 
 
-def _select_configs(configs: list, models: set[str], source: Path) -> list:
-    """Keep only configs whose model is in `models` (empty = keep all)."""
-    if not models:
-        return configs
+def _resolve_dataset_path(config: dict) -> None:
+    """Expand environment variables in a config's `dataset-path`, in place.
+
+    Applies DATASET_PATH_DEFAULTS for variables the host has not set, so an
+    unexpanded `${...}` never reaches the benchmark CLI.
+    """
+    parameters = config.get("parameters")
+    if not parameters:
+        return
+    path = parameters.get("dataset-path")
+    if not path:
+        return
+    env = {**DATASET_PATH_DEFAULTS, **os.environ}
+    parameters["dataset-path"] = string.Template(str(path)).safe_substitute(env)
+
+
+def _missing_dataset(config: dict) -> str | None:
+    """Dataset path a config needs but which is absent on this host, if any."""
+    path = config.get("parameters", {}).get("dataset-path")
+    if path and not Path(path).exists():
+        return str(path)
+    return None
+
+
+def _select_configs(configs: list, models: set[str]) -> list:
+    """Keep configs whose model is selected (empty `models` = all) and whose
+    dataset, if any, exists on this host."""
     selected = []
     for config in configs:
         model = _config_model(config)
-        if model and model.lower() in models:
-            selected.append(config)
-        else:
+        if models and not (model and model.lower() in models):
             log.info("Skipping %s (model %s not selected)", config.get("test_name"), model)
+            continue
+        _resolve_dataset_path(config)
+        missing = _missing_dataset(config)
+        if missing:
+            log.warning(
+                "Skipping %s: dataset %s not present on this host",
+                config.get("test_name"),
+                missing,
+            )
+            continue
+        selected.append(config)
     return selected
 
 
@@ -131,9 +178,9 @@ def build_env_vars(env_config: dict) -> dict[str, str]:
     return env_vars
 
 
-# Invoke the vLLM CLI directly: the dynamo recompile-limit raise the benchmarks
-# need is applied by the platform plugin at import (see
-# spyre_inference/platform.py::_raise_dynamo_recompile_limits, torch-spyre #444).
+# Equivalent to the `vllm` console script, but run through sys.executable so the
+# CLI always uses this interpreter's environment instead of whatever `vllm` PATH
+# resolves to.
 VLLM_CLI = [sys.executable, "-m", "vllm.entrypoints.cli.main"]
 
 
@@ -193,7 +240,7 @@ def run_benchmarks_from_file(
         log.error("%s is not a YAML list", config_file)
         return 0, 1
 
-    configs = _select_configs(configs, models, config_file)
+    configs = _select_configs(configs, models)
 
     passed = 0
     failed = 0
@@ -344,7 +391,7 @@ def run_serve_benchmarks_from_file(
         log.error("%s is not a YAML list", config_file)
         return 0, 1
 
-    configs = _select_configs(configs, models, config_file)
+    configs = _select_configs(configs, models)
 
     passed = 0
     failed = 0
