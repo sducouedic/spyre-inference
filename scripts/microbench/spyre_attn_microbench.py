@@ -643,7 +643,7 @@ def unreachable_reason(query_lens) -> str:
     return ""
 
 
-def record_padding(row, attn_metadata, query_lens, seq_lens, block_size):
+def record_padding(row, attn_metadata, query_lens, seq_lens, block_size, sliding_window=None):
     """Record the shape the kernel got, and flag it when that is not the one asked for."""
     # A mask stack holds one [aligned_query_len, block_size] mask tile per active block,
     # so shape[0] is the number of blocks the kernel iterated for that sequence.
@@ -654,6 +654,25 @@ def record_padding(row, attn_metadata, query_lens, seq_lens, block_size):
 
     declared_blocks = [(s + block_size - 1) // block_size for s in seq_lens]
     declared_query = [max(1, q) for q in query_lens]
+    if sliding_window is not None:
+        # A window drops out-of-window blocks and pads back to its bucket maximum,
+        # so the identity does not hold; only the per-sequence bound is meaningful.
+        for s, (realized, aligned) in enumerate(zip(realized_blocks, realized_query)):
+            bound = min(
+                declared_blocks[s],
+                (sliding_window + aligned - 1 + block_size - 1) // block_size + 1,
+            )
+            if realized > bound:
+                row["error"] = (
+                    f"windowed active blocks {realized} exceed the bucket bound {bound} "
+                    f"for sequence {s}"
+                )
+                print(f"    -> {row['error']}", flush=True)
+                return
+        if realized_query != declared_query:
+            row["error"] = f"query padding is not the identity: {declared_query}->{realized_query}"
+            print(f"    -> {row['error']}", flush=True)
+        return
     if realized_blocks != declared_blocks or realized_query != declared_query:
         row["error"] = (
             f"padding is not the identity: blocks {declared_blocks}->{realized_blocks}, "
@@ -807,7 +826,14 @@ def run_config(entry, variant, cfg, records, csv_path, block_size=None):
             records.append(row)
             return
 
-        record_padding(row, inputs["attn_metadata"], query_lens, seq_lens, block_size)
+        record_padding(
+            row,
+            inputs["attn_metadata"],
+            query_lens,
+            seq_lens,
+            block_size,
+            cfg.get("sliding_window"),
+        )
 
         run, output, impl = make_forward(
             inputs,
