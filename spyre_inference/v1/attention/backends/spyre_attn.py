@@ -579,8 +579,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         context_len: int,
         aligned_query_len: int,
         apply_causal_mask: bool,
-    ) -> tuple[list[int], list[torch.Tensor]]:
-        """Return (active_block_indices, mask_tiles) using arithmetic block-skip.
+    ) -> tuple[list[int], list[torch.Tensor], int]:
+        """Return active block indices, mask tiles, and the real block count.
 
         active_block_indices: absolute block indices whose mask contributes
         to at least one query's attention (i.e. inside the window of the
@@ -641,7 +641,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
 
         active_bs = list(range(first_active, num_blocks))
         if not active_bs:
-            return [], []
+            return [], [], 0
 
         zero_tile = self._get_zero_tile(aligned_query_len)
         tiles: list[torch.Tensor] = []
@@ -668,7 +668,18 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 # Mask is all-zero.
                 tiles.append(zero_tile)
 
-        return active_bs, tiles
+        real_num_blocks = len(active_bs)
+        padded_num_blocks = self._pad_num_blocks(real_num_blocks)
+        if padded_num_blocks > real_num_blocks:
+            masked_tile = torch.full(
+                (aligned_query_len, block_size),
+                torch.finfo(self.model_dtype).min,
+                dtype=self.model_dtype,
+            )
+            active_bs.extend([active_bs[-1]] * (padded_num_blocks - real_num_blocks))
+            tiles.extend([masked_tile] * (padded_num_blocks - real_num_blocks))
+
+        return active_bs, tiles, real_num_blocks
 
     def build(
         self,
@@ -794,9 +805,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # Sliding window: arithmetic block-skip. Blocks entirely outside
             # every query's window are dropped; interior blocks share a
             # zero mask tile; only boundary blocks get real per-query cutoffs.
-            # Left unpadded (padded_num_blocks stays None): len(active_bs) is a
-            # window-width quantity, already near-constant across decode steps.
-            # TODO: give this its own window-width buckets if it ever needs recording.
+            # The active count is padded onto the ordinary KV block buckets so
+            # rolling window boundaries reuse the graphs recorded at warmup.
             active_block_indices = []
             query_lens_list = query_lens.tolist()
             seq_lens_list = seq_lens.tolist()
@@ -806,7 +816,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 query_len_s = int(query_lens_list[s])
                 context_len_s = kv_len_s - query_len_s
 
-                active_bs, tiles = self._build_active_tiles_with_skip(
+                active_bs, tiles, real = self._build_active_tiles_with_skip(
                     kv_len_s,
                     query_len_s,
                     context_len_s,
@@ -814,6 +824,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     apply_causal_mask and aligned_query_lens[s] > 1,
                 )
                 active_block_indices.append(active_bs)
+                real_num_blocks.append(real)
                 # Interior blocks share one zero tile by reference; the stack copies it out.
                 attention_mask_stacks.append(
                     torch.stack(tiles)
@@ -826,9 +837,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         num_active = [int(stack.shape[0]) for stack in attention_mask_stacks]
         page_index_tables_cpu = []
         for s, n in enumerate(num_active):
-            blocks_s = slice(n) if active_block_indices is None else active_block_indices[s]
             table = torch.zeros(n, INT32_ELEMS_PER_STICK, dtype=torch.int32)
-            table[:, 0] = block_table[s, blocks_s]
+            if active_block_indices is None:
+                table[:, 0] = block_table[s, :n]
+            else:
+                real = real_num_blocks[s]
+                table[:real, 0] = block_table[s, active_block_indices[s][:real]]
             page_index_tables_cpu.append(table)
 
         # Padded to match key/value by upstream once forward_includes_kv_cache_update is
@@ -887,7 +901,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 else:
                     # Position i is the i-th ACTIVE block, matching the mask tiles.
                     for s, abs_blocks in enumerate(active_block_indices[:num_decode_seqs]):
-                        n_use = min(len(abs_blocks), b_blocks)
+                        n_use = min(real_num_blocks[s], b_blocks)
                         for b, abs_b in enumerate(abs_blocks[:n_use]):
                             block_ids_padded[b, s] = bt[s, abs_b]
                 # Entry order (s, j), s major, matching rep_row_ids and the mask.
@@ -969,6 +983,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         """Metadata for the one-sequence batch that dispatches to ``bucket``."""
         query_len = self._attn_bucketer.min_real_query_len(bucket.padded_query_len)
         kv_len = bucket.num_blocks * self.block_size
+        if self.sliding_window is not None:
+            block_buckets = self._attn_bucketer.num_blocks_buckets
+            bucket_idx = block_buckets.index(bucket.num_blocks)
+            previous = block_buckets[bucket_idx - 1] if bucket_idx else 0
+            kv_len = previous * self.block_size + 1
+            query_len = min(bucket.padded_query_len, kv_len)
         assert query_len <= kv_len, f"{bucket} pairs a query length no sequence can reach"
         query_start_loc = torch.tensor([0, query_len], dtype=torch.int32)
         # Every block points at page 0, vLLM's null block: nothing real is read.
@@ -1000,6 +1020,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         """
         num_seqs = bucket.num_seqs
         kv_len = bucket.num_blocks * self.block_size
+        if self.sliding_window is not None:
+            block_buckets = self._attn_bucketer.num_blocks_buckets
+            bucket_idx = block_buckets.index(bucket.num_blocks)
+            previous = block_buckets[bucket_idx - 1] if bucket_idx else 0
+            kv_len = previous * self.block_size + 1
         query_start_loc = torch.arange(num_seqs + 1, dtype=torch.int32)
         metadata = self.build(
             common_prefix_len=0,

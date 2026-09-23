@@ -2390,7 +2390,8 @@ def test_sliding_window_block_skip_unaffected_by_clamp(default_vllm_config):
     first_active = max(0, context_len - window + 1) // block_size
     num_blocks = (kv_len + block_size - 1) // block_size
     assert metadata.active_block_indices is not None
-    assert metadata.active_block_indices[0] == list(range(first_active, num_blocks))
+    real = list(range(first_active, num_blocks))
+    assert metadata.active_block_indices[0][: len(real)] == real
 
 
 def test_sliding_window_mask_and_page_rows_share_active_block_order(default_vllm_config):
@@ -2424,7 +2425,9 @@ def test_sliding_window_mask_and_page_rows_share_active_block_order(default_vllm
     assert stacks[0].shape[0] == tables[0].shape[0] == len(active[0])
 
     mask_min = torch.finfo(stacks[0].dtype).min
-    for row, logical_block in enumerate(active[0]):
+    first_active = active[0][0]
+    real_num_blocks = num_blocks - first_active
+    for row, logical_block in enumerate(active[0][:real_num_blocks]):
         assert tables[0][row, 0] == block_table[0, logical_block]
         open_offsets = (stacks[0][row, 0] > mask_min).nonzero().flatten().tolist()
         open_positions = [logical_block * block_size + offset for offset in open_offsets]
@@ -2432,10 +2435,12 @@ def test_sliding_window_mask_and_page_rows_share_active_block_order(default_vllm
 
     open_positions = [
         logical_block * block_size + offset
-        for row, logical_block in enumerate(active[0])
+        for row, logical_block in enumerate(active[0][:real_num_blocks])
         for offset in (stacks[0][row, 0] > mask_min).nonzero().flatten().tolist()
     ]
     assert open_positions == list(range(kv_len - window, kv_len))
+    assert torch.all(tables[0][real_num_blocks:] == 0)
+    assert torch.all(stacks[0][real_num_blocks:] == mask_min)
 
 
 def _num_blocks_buckets(block_size: int = 64) -> list[int]:
@@ -2512,9 +2517,13 @@ def test_zero_kv_len_stays_at_zero_blocks(default_vllm_config):
     assert metadata.padded_num_blocks[1] == 2
 
 
-def test_sliding_window_is_left_unpadded(default_vllm_config):
+def test_sliding_window_is_padded_to_kv_bucket(default_vllm_config):
     torch.set_default_device("cpu")
     metadata = _padded_mask_metadata(
         [(7, 300)], block_size=64, sliding_window=128, max_num_blocks=_num_blocks_buckets()[-1]
     )
     assert metadata.padded_num_blocks is None
+    assert metadata.active_block_indices is not None
+    assert len(metadata.active_block_indices[0]) == 4
+    assert metadata.attention_mask_stacks[0].shape[0] == 4
+    assert torch.all(metadata.page_index_tables_cpu[0][3:] == 0)

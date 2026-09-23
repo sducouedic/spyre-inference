@@ -31,6 +31,7 @@ import torch
 from torch._dynamo.utils import counters
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import _print_warning_once
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec
 
 from spyre_inference import envs
@@ -117,8 +118,7 @@ def builder(default_vllm_config):
 
 @pytest.fixture()
 def sliding_window_builder(default_vllm_config):
-    """A builder whose window leaves the active-block count unpadded, so several
-    requested buckets realize onto one kernel."""
+    """A builder whose active block count crosses a bucket while rolling."""
     return _make_builder(
         FullAttentionSpec(
             block_size=BLOCK_SIZE,
@@ -126,7 +126,7 @@ def sliding_window_builder(default_vllm_config):
             head_size=HEAD_SIZE,
             head_size_v=HEAD_SIZE,
             dtype=torch.float16,
-            sliding_window=BLOCK_SIZE,
+            sliding_window=3 * BLOCK_SIZE,
         )
     )
 
@@ -218,26 +218,42 @@ class TestRecordGraphs:
         assert _record(impl, kv_cache, builder) == first
         assert compiles() == snapshot
 
-    def test_buckets_collapsing_onto_one_kernel_record_once(
-        self, impl, kv_cache, sliding_window_builder
-    ):
-        """Deduping on the realized bucket must not drop a graph dispatch needs."""
+    def test_windowed_runtime_shapes_are_recorded(self, impl, kv_cache, sliding_window_builder):
+        """Every real windowed shape pads onto a graph compiled during warmup."""
         bucketer = sliding_window_builder._attn_bucketer = make_bucketer()
 
-        recorded = _record(impl, kv_cache, sliding_window_builder)
-
-        requested = _recordable(bucketer)
-        assert 0 < recorded < len(requested), "no buckets collapsed; nothing deduped"
+        assert _record(impl, kv_cache, sliding_window_builder) > 0
 
         snapshot = compiles()
-        for bucket in requested:
-            _dispatch(
-                impl,
-                sliding_window_builder,
-                kv_cache,
-                bucket.num_blocks,
-                bucket.padded_query_len,
-            )
+        for query_len in (1, 2, 32, 64):
+            for kv_len in range(query_len, 257):
+                query_start_loc = torch.tensor([0, query_len], dtype=torch.int32)
+                metadata = sliding_window_builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=CommonAttentionMetadata(
+                        query_start_loc=query_start_loc,
+                        query_start_loc_cpu=query_start_loc,
+                        seq_lens=torch.tensor([kv_len], dtype=torch.int32),
+                        num_reqs=1,
+                        num_actual_tokens=query_len,
+                        max_query_len=query_len,
+                        max_seq_len=kv_len,
+                        block_table_tensor=torch.zeros(1, NUM_PAGES, dtype=torch.int32),
+                        slot_mapping=torch.zeros(query_len, dtype=torch.int64),
+                        causal=True,
+                        is_prefilling=torch.tensor([query_len > 1]),
+                    ),
+                )
+                assert metadata.active_block_indices is not None
+                num_blocks = len(metadata.active_block_indices[0])
+                assert num_blocks in bucketer.num_blocks_buckets
+                _dispatch(
+                    impl,
+                    sliding_window_builder,
+                    kv_cache,
+                    num_blocks,
+                    metadata.aligned_query_lens[0],
+                )
         assert compiles() == snapshot
 
     def test_collapsing_without_a_sliding_window_warns(
@@ -261,6 +277,27 @@ class TestRecordGraphs:
             _record(impl, kv_cache, sliding_window_builder)
 
         assert "diverged" not in caplog.text
+
+    def test_gemma4_rolling_decode_pads_nine_blocks_to_sixteen(
+        self, default_vllm_config, monkeypatch
+    ):
+        from spyre_testing_plugin.attn_helpers import _padded_mask_metadata
+
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "128,256,512,1024,2048")
+        metadata = _padded_mask_metadata(
+            [(1, 1025)],
+            block_size=128,
+            sliding_window=1024,
+            num_query_heads=NUM_HEADS,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            max_num_blocks=16,
+        )
+
+        assert metadata.active_block_indices is not None
+        assert len(metadata.active_block_indices[0]) == 16
+        assert metadata.attention_mask_stacks[0].shape[0] == 16
+        assert torch.all(metadata.page_index_tables_cpu[0][9:] == 0)
 
     def test_skips_variants_exceeding_the_page_allocation(self, impl, kv_cache, builder):
         """Buckets sized from max_model_len can outrun a small KV cache."""
@@ -632,32 +669,23 @@ class TestRecordBatchedDecode:
         assert len(batched) < len(bucketer.batched_decode_variants())
         assert recorded == len(_recordable(bucketer)) + len(batched)
 
-    def test_window_variants_over_the_requested_budget_still_record(
+    def test_window_variants_over_the_page_budget_are_skipped(
         self, impl, kv_cache, sliding_window_builder
     ):
-        """A window shrinks the realized entry axis, so the skip must key on that.
-
-        Keying on the bucket's window-agnostic ``blocks_per_chunk`` would drop
-        variants whose realized gather fits the cache, putting their compile back
-        in the serving path.
-        """
+        """Windowed block padding obeys the same page budget as full attention."""
         bucketer = sliding_window_builder._attn_bucketer = make_bucketer()
-        # Over the budget as requested, but the window shrinks blocks_per_chunk to 1,
-        # so what the kernel actually gathers fits and dispatch does reach these.
-        reachable = [
+        oversized = [
             v
             for v in bucketer.batched_decode_variants()
             if v.num_seqs * v.blocks_per_chunk >= NUM_PAGES and v.num_seqs < NUM_PAGES
         ]
-        assert reachable, "no variant exceeds the requested budget; nothing under test"
+        assert oversized, "no variant exceeds the requested budget; nothing under test"
 
-        _record(impl, kv_cache, sliding_window_builder)
-
-        # Each one must have been traced during recording, so dispatch compiles nothing.
-        snapshot = compiles()
-        for bucket in reachable:
-            _dispatch_batched(impl, sliding_window_builder, kv_cache, bucket)
-        assert compiles() == snapshot
+        for bucket in oversized:
+            realized = impl._record_batched_one(
+                bucket, MagicMock(), kv_cache, sliding_window_builder, set(), NUM_PAGES
+            )
+            assert realized is None
 
     def test_re_recording_compiles_nothing(self, impl, wide_cache, builder):
         builder._attn_bucketer = make_bucketer()
