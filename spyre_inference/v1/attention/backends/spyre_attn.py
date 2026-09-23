@@ -979,17 +979,50 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             mask_by_chunk_cpu=mask_by_chunk_cpu,
         )
 
-    def build_for_variant(self, bucket: SpyreAttnBucket) -> SpyreAttentionMetadata:
-        """Metadata for the one-sequence batch that dispatches to ``bucket``."""
+    def _windowed_kv_len(self, blocks_bucket: int, query_len: int) -> int | None:
+        """A kv_len whose *active* block count pads onto ``blocks_bucket``.
+
+        Under a window the block count build() realizes is the active count
+        ``ceil(kv_len / block_size) - first_active``, so the full kv_len a
+        windowless variant uses would land on a smaller bucket. Picks the
+        shortest sequence that still pads up here: every count in
+        ``(previous bucket, blocks_bucket]`` rounds onto this one, and a longer
+        kv_len at the same count only pushes the window start further along, so
+        the shortest maximizes the active count. None when the window's reach
+        cannot fill the bucket at this query length -- no sequence realizes it,
+        and dispatch never asks for it either.
+        """
+        assert self.sliding_window is not None
+        block_size = self.block_size
+        block_buckets = self._attn_bucketer.num_blocks_buckets
+        previous_idx = block_buckets.index(blocks_bucket)
+        previous = block_buckets[previous_idx - 1] if previous_idx else 0
+        for num_blocks in range(previous + 1, blocks_bucket + 1):
+            kv_len = max((num_blocks - 1) * block_size + 1, query_len)
+            if kv_len > num_blocks * block_size:
+                continue
+            context_len = kv_len - query_len
+            if max(0, context_len - self.sliding_window + 1) // block_size == 0:
+                return kv_len
+        return None
+
+    def build_for_variant(self, bucket: SpyreAttnBucket) -> SpyreAttentionMetadata | None:
+        """Metadata for the one-sequence batch that dispatches to ``bucket``.
+
+        None when no sequence realizes this bucket: a query bucket wider than
+        the block count can hold, or (under a window) more active blocks than
+        the window reaches.
+        """
         query_len = self._attn_bucketer.min_real_query_len(bucket.padded_query_len)
-        kv_len = bucket.num_blocks * self.block_size
-        if self.sliding_window is not None:
-            block_buckets = self._attn_bucketer.num_blocks_buckets
-            bucket_idx = block_buckets.index(bucket.num_blocks)
-            previous = block_buckets[bucket_idx - 1] if bucket_idx else 0
-            kv_len = previous * self.block_size + 1
-            query_len = min(bucket.padded_query_len, kv_len)
-        assert query_len <= kv_len, f"{bucket} pairs a query length no sequence can reach"
+        if self.sliding_window is None:
+            kv_len = bucket.num_blocks * self.block_size
+        else:
+            windowed = self._windowed_kv_len(bucket.num_blocks, query_len)
+            if windowed is None:
+                return None
+            kv_len = windowed
+        if query_len > kv_len:
+            return None
         query_start_loc = torch.tensor([0, query_len], dtype=torch.int32)
         # Every block points at page 0, vLLM's null block: nothing real is read.
         return self.build(
@@ -1432,8 +1465,14 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         builder: "SpyreAttentionMetadataBuilder",
         recorded: "set[SpyreAttnBucket]",
     ) -> "SpyreAttnBucket | None":
-        """Trace the kernel ``bucket`` needs; None if ``build()`` realized one already traced."""
+        """Trace the kernel ``bucket`` needs.
+
+        None when ``build()`` realized one already traced, or when no sequence
+        realizes this bucket at all.
+        """
         attn_metadata = builder.build_for_variant(bucket)
+        if attn_metadata is None:
+            return None
         assert attn_metadata.attention_mask_stacks is not None
         realized = SpyreAttnBucket(
             num_blocks=int(attn_metadata.attention_mask_stacks[0].shape[0]),

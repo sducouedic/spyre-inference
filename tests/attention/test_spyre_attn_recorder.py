@@ -131,6 +131,21 @@ def sliding_window_builder(default_vllm_config):
     )
 
 
+@pytest.fixture()
+def narrow_window_builder(default_vllm_config):
+    """A builder whose window is too short to fill the larger block buckets."""
+    return _make_builder(
+        FullAttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            head_size_v=HEAD_SIZE,
+            dtype=torch.float16,
+            sliding_window=BLOCK_SIZE,
+        )
+    )
+
+
 def make_bucketer(max_model_len=256, max_num_batched_tokens=64, max_num_seqs=8):
     config = MagicMock()
     config.cache_config.block_size = BLOCK_SIZE
@@ -255,6 +270,33 @@ class TestRecordGraphs:
                     metadata.aligned_query_lens[0],
                 )
         assert compiles() == snapshot
+
+    def test_windowed_variants_keep_their_query_width(self, impl, kv_cache, sliding_window_builder):
+        """A windowed variant must record the query width it was asked for.
+
+        Its kv_len is picked to pad onto the bucket's block count, which is
+        shorter than the bucket's full span; clamping the query to that kv_len
+        instead would record a narrower graph and leave the real short prefill
+        compiling in the serving path.
+        """
+        bucketer = sliding_window_builder._attn_bucketer = make_bucketer()
+
+        for bucket in _recordable(bucketer):
+            metadata = sliding_window_builder.build_for_variant(bucket)
+            assert metadata is not None, f"{bucket} was skipped; the window reaches it"
+            assert metadata.aligned_query_lens[0] == bucket.padded_query_len
+            assert metadata.attention_mask_stacks is not None
+            assert metadata.attention_mask_stacks[0].shape[0] == bucket.num_blocks
+
+    def test_unreachable_windowed_variants_are_skipped(self, impl, kv_cache, narrow_window_builder):
+        """A block bucket the window cannot fill has no sequence to record it with."""
+        bucketer = narrow_window_builder._attn_bucketer = make_bucketer()
+
+        skipped = [
+            b for b in _recordable(bucketer) if narrow_window_builder.build_for_variant(b) is None
+        ]
+        assert skipped, "nothing is out of the window's reach; the skip path is untested"
+        assert all(b.num_blocks > 2 for b in skipped)
 
     def test_collapsing_without_a_sliding_window_warns(
         self, impl, kv_cache, builder, caplog, monkeypatch
@@ -696,15 +738,15 @@ class TestRecordBatchedDecode:
         assert compiles() == snapshot
 
     def test_batched_buckets_collapsing_onto_one_kernel_record_once(
-        self, impl, wide_cache, sliding_window_builder
+        self, impl, wide_cache, narrow_window_builder
     ):
         """Deduping on the realized key must not drop a graph dispatch needs."""
-        bucketer = sliding_window_builder._attn_bucketer = make_bucketer()
+        bucketer = narrow_window_builder._attn_bucketer = make_bucketer()
         requested = self._recordable_batched(bucketer)
 
-        recorded = _record(impl, wide_cache, sliding_window_builder)
-        # The window collapses both axes, so the total is below what either
-        # enumeration asks for on its own.
+        recorded = _record(impl, wide_cache, narrow_window_builder)
+        # A one-block window cannot fill the larger block buckets, so several
+        # requested variants realize onto one kernel.
         assert recorded < self._expected(bucketer, len(requested)), (
             "nothing collapsed; the dedupe path is untested"
         )
@@ -712,7 +754,7 @@ class TestRecordBatchedDecode:
         # Every requested bucket must still reach a traced graph.
         snapshot = compiles()
         for bucket in requested:
-            _dispatch_batched(impl, sliding_window_builder, wide_cache, bucket)
+            _dispatch_batched(impl, narrow_window_builder, wide_cache, bucket)
         assert compiles() == snapshot
 
     def test_batched_dispatch_after_recording_compiles_nothing(self, impl, wide_cache, builder):
