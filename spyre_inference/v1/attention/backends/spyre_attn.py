@@ -987,8 +987,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             block_buckets = self._attn_bucketer.num_blocks_buckets
             bucket_idx = block_buckets.index(bucket.num_blocks)
             previous = block_buckets[bucket_idx - 1] if bucket_idx else 0
-            kv_len = previous * self.block_size + 1
-            query_len = min(bucket.padded_query_len, kv_len)
+            # One token past the previous rung is the shortest length whose active
+            # count pads onto this one. Raised to hold query_len when that is longer:
+            # clamping the query instead would round it onto a narrower width, and the
+            # variant would be recorded as one the bucket is not -- leaving the real
+            # shape to compile during serving.
+            kv_len = max(previous * self.block_size + 1, query_len)
         assert query_len <= kv_len, f"{bucket} pairs a query length no sequence can reach"
         query_start_loc = torch.tensor([0, query_len], dtype=torch.int32)
         # Every block points at page 0, vLLM's null block: nothing real is read.
