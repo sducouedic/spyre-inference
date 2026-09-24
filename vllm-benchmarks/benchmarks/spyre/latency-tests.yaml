@@ -1,21 +1,16 @@
 # Latency benchmarks for Spyre devices, at the shapes the agentic traces show.
 #
 # Each entry under `tests` is merged over `defaults` and can override any key.
-# run_vllm_benchmarks.py derives SPYRE_DEVICES / AIU_WORLD_SIZE from
-# tensor_parallel_size, so an entry only names its TP.
 #
 # `vllm bench latency` has no dataset support: it generates one fixed
-# input-len/output-len shape. So rather than replaying the traces the serve
-# benchmarks use, these entries approximate them -- same models, same
-# max-model-len, and input/output lengths at the median of what each trace's
-# replayed window actually measured:
+# input-len/output-len shape, so these entries approximate the traces the serve
+# benchmarks replay instead -- same models, same max-model-len, input/output
+# lengths at the median of each trace's replayed window:
 #
 #   aiops (4k):  prompt p50 1476 -> in1536,  output p50 48  -> out64
 #   cics  (8k):  prompt p50 4053 -> in4096,  output p50 573 -> out576
 #
 # input-len is 128-aligned so the prompt fills a whole number of KV blocks.
-# The `_smoke` entry keeps a short shape for a fast signal that needs neither
-# a large model nor a long compile.
 #
 # The trailing suffix names the trace whose shape an entry approximates, and
 # in<N>_out<N> is part of the benchmark identity downstream
@@ -26,7 +21,6 @@ defaults:
   environment_variables:
     VLLM_CPU_KVCACHE_SPACE: 64
     DTLOG_LEVEL: error
-    # Allow long compilation.
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '1800'
   parameters:
     dtype: float16

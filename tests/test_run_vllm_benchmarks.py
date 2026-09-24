@@ -22,9 +22,7 @@ VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, the bench side inherits the server's model,
 absent aborts the run instead of being skipped.
 
 All three checked-in configs are loaded as-is at the end, so a config edit that
-breaks these invariants fails here. The offline configs cover the serve models at
-the shapes that approximate the traces serve replays, so the two paths stay
-comparable; that correspondence is asserted rather than assumed.
+breaks these invariants fails here.
 """
 
 import importlib.util
@@ -311,10 +309,7 @@ def test_serve_tests_yaml_derives_consistently():
         assert config["server_parameters"]["max-model-len"] == DATASET_CONTEXT_LEN[trace]
 
 
-# Latency/throughput cannot replay the traces: `bench latency` takes no dataset,
-# and `bench throughput` rejects the `custom` dataset serve loads them through.
-# They approximate each trace with the median prompt/output length of its
-# replayed window, at the same max-model-len serve uses.
+# The shape each offline entry runs to approximate a trace serve replays.
 TRACE_SHAPES = {
     "aiops": {"input_len": 1536, "output_len": 64, "max_model_len": 4096},
     "cics": {"input_len": 4096, "output_len": 576, "max_model_len": 8192},
@@ -350,8 +345,7 @@ def test_offline_tests_yaml_derives_consistently(config_file):
         assert f"_in{parameters[input_key]}_" in name, name
         assert f"_out{parameters[output_key]}_" in name, name
 
-        # A `_smoke` entry is deliberately its own short shape; every other
-        # entry approximates one trace and must use that trace's whole shape.
+        # A `_smoke` entry is its own short shape; every other names a trace.
         trace = name.rsplit("_", 1)[1]
         if trace == "smoke":
             continue
@@ -363,12 +357,7 @@ def test_offline_tests_yaml_derives_consistently(config_file):
 
 
 def test_offline_configs_cover_the_serve_models():
-    """The offline suites benchmark what serve does, at the same context length.
-
-    Reading a regression across the offline and online paths only works if both
-    ran the same (model, tp, context) points, and nothing else ties the three
-    files together.
-    """
+    """The offline suites benchmark what serve does, at the same context length."""
     serve_points = {
         (
             runner._config_model(config),

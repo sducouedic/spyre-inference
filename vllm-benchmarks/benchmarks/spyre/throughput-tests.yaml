@@ -1,25 +1,19 @@
 # Throughput benchmarks for Spyre devices, at the shapes the agentic traces show.
 #
 # Each entry under `tests` is merged over `defaults` and can override any key.
-# run_vllm_benchmarks.py derives SPYRE_DEVICES / AIU_WORLD_SIZE from
-# tensor_parallel_size, so an entry only names its TP.
 #
-# `vllm bench throughput` cannot replay the traces the serve benchmarks use:
-# its --dataset-name rejects `custom`, the choice serve replays them through.
-# So these entries approximate them instead -- same models, same max-model-len,
-# and random-input/output lengths at the median of what each trace's replayed
-# window actually measured, over the same number of prompts serve replays:
+# `vllm bench throughput` cannot replay the traces the serve benchmarks use: its
+# --dataset-name rejects `custom`, the choice serve replays them through. So
+# these entries approximate them instead -- same models, same max-model-len,
+# random-input/output lengths at the median of each trace's replayed window,
+# over the same number of prompts serve replays:
 #
 #   aiops (4k):  prompt p50 1476 -> in1536,  output p50 48  -> out64,  50 prompts
 #   cics  (8k):  prompt p50 4053 -> in4096,  output p50 573 -> out576, 100 prompts
 #
 # random-input-len is 128-aligned so each prompt fills a whole number of KV
-# blocks. random-range-ratio is 0, so every prompt gets exactly that length
-# rather than a spread: the point here is a reproducible shape, and the length
-# spread is what the serve benchmarks measure.
-#
-# The `_smoke` entry keeps a short shape for a fast signal that needs neither
-# a large model nor a long compile.
+# blocks. random-range-ratio is 0, so every prompt gets exactly that length: the
+# length spread is what the serve benchmarks measure.
 #
 # The trailing suffix names the trace whose shape an entry approximates, and
 # in<N>_out<N> is part of the benchmark identity downstream
@@ -30,7 +24,6 @@ defaults:
   environment_variables:
     VLLM_CPU_KVCACHE_SPACE: 64
     DTLOG_LEVEL: error
-    # Extra time to compile.
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '1800'
   parameters:
     dtype: float16

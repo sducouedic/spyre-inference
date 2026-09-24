@@ -16,9 +16,7 @@ Serve entries replay a recorded agentic trace: real router prompts, each request
 
 Trace paths come from `SPYRE_AIOPS_DATASET` (`*_aiops`, run at 4k) and `SPYRE_CICS_DATASET` (`*_cics`, run at 8k), so each host can point at its own copy; unset, each falls back to its location on the Spyre benchmark hosts. A selected entry whose file is absent fails the run, so a serve-only job cannot go green without measuring anything.
 
-Latency and throughput cannot replay those traces — `vllm bench latency` takes no dataset at all, and `vllm bench throughput` rejects the `custom` dataset the traces load through. They approximate each trace instead, at the median prompt and output length its replayed window measured: `in1536_out64` at 4k for aiops, `in4096_out576` at 8k for cics, with the input length 128-aligned so a prompt fills whole KV blocks. An entry's trailing suffix names the trace whose shape it approximates, and `in<N>_out<N>` is part of the benchmark identity downstream, so changing a shape starts a new trend line rather than bending the old one.
-
-The `*_smoke` entries keep a short shape on a small model as a fast signal that needs neither a large model nor a long compile.
+Latency and throughput cannot replay those traces — `vllm bench latency` takes no dataset at all, and `vllm bench throughput` rejects the `custom` dataset the traces load through. They approximate each trace instead, at the median prompt and output length its replayed window measured: `in1536_out64` at 4k for aiops, `in4096_out576` at 8k for cics, with the input length 128-aligned so a prompt fills whole KV blocks. An entry's trailing suffix names the trace whose shape it approximates, and `in<N>_out<N>` is part of the benchmark identity downstream, so changing a shape starts a new trend line rather than bending the old one. The `*_smoke` entries are the exception: a short shape on a small model, as a fast signal that needs no long compile.
 
 ## Running locally
 
