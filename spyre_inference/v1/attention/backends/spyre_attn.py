@@ -861,6 +861,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                         self._pad_num_blocks((kv_len_s + block_size - 1) // block_size),
                         aligned_query_lens[s],
                     )
+                    # A bound below the real count would silently leave the count
+                    # sliding, i.e. the bug this padding fixes, with no signal.
+                    assert len(active_bs) <= max_active_s, (
+                        f"{len(active_bs)} active blocks exceed the bucket bound "
+                        f"{max_active_s} (kv_len={kv_len_s}, query_len={query_len_s})"
+                    )
                     if len(active_bs) < max_active_s:
                         masked_tile = self._get_masked_tile(aligned_query_lens[s])
                         pad = max_active_s - len(active_bs)
