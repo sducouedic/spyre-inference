@@ -179,7 +179,11 @@ def build_metadata(
     slot_mapping,
     sliding_window=None,
 ):
-    """Drive the real SpyreAttentionMetadataBuilder."""
+    """Drive the real SpyreAttentionMetadataBuilder; return it alongside its metadata.
+
+    The builder comes back so callers can ask it what a shape should have been
+    rather than restating its formulas.
+    """
     from unittest.mock import Mock
 
     from vllm.config import get_current_vllm_config
@@ -216,7 +220,7 @@ def build_metadata(
         slot_mapping=slot_mapping,
         causal=True,
     )
-    return builder.build(common_prefix_len=0, common_attn_metadata=common)
+    return builder, builder.build(common_prefix_len=0, common_attn_metadata=common)
 
 
 def _fused_qkv_kv_views(query, key, value, device):
@@ -329,7 +333,7 @@ def build_inputs_from_requests(
         q_off += ql
     slot_mapping = torch.tensor(slot_mapping, dtype=torch.int64)
 
-    attn_metadata = build_metadata(
+    builder, attn_metadata = build_metadata(
         num_query_heads,
         num_kv_heads,
         head_size,
@@ -403,6 +407,7 @@ def build_inputs_from_requests(
         "query_cpu": query,
         "block_tables": block_tables,
         "attn_metadata": attn_metadata,
+        "builder": builder,
         "scale": scale,
         "cache_device": cache_device,
         "query_lens": list(query_lens),
@@ -643,7 +648,7 @@ def unreachable_reason(query_lens) -> str:
     return ""
 
 
-def record_padding(row, attn_metadata, query_lens, seq_lens, block_size, sliding_window=None):
+def record_padding(row, attn_metadata, query_lens, seq_lens, block_size, builder=None):
     """Record the shape the kernel got, and flag it when that is not the one asked for."""
     # A mask stack holds one [aligned_query_len, block_size] mask tile per active block,
     # so shape[0] is the number of blocks the kernel iterated for that sequence.
@@ -654,14 +659,14 @@ def record_padding(row, attn_metadata, query_lens, seq_lens, block_size, sliding
 
     declared_blocks = [(s + block_size - 1) // block_size for s in seq_lens]
     declared_query = [max(1, q) for q in query_lens]
-    if sliding_window is not None:
+    if builder is not None and builder.sliding_window is not None:
         # A window drops out-of-window blocks and pads back to its bucket maximum,
         # so the identity does not hold; only the per-sequence bound is meaningful.
+        # The bound comes from the builder rather than being restated here, so the
+        # check cannot drift from the padding it verifies. It is asked for the same
+        # bucket build() used -- the padded block count, not the sequence's own.
         for s, (realized, aligned) in enumerate(zip(realized_blocks, realized_query)):
-            bound = min(
-                declared_blocks[s],
-                (sliding_window + aligned - 1 + block_size - 1) // block_size + 1,
-            )
+            bound = builder._max_active_blocks(builder._pad_num_blocks(declared_blocks[s]), aligned)
             if realized > bound:
                 row["error"] = (
                     f"windowed active blocks {realized} exceed the bucket bound {bound} "
@@ -832,7 +837,7 @@ def run_config(entry, variant, cfg, records, csv_path, block_size=None):
             query_lens,
             seq_lens,
             block_size,
-            cfg.get("sliding_window"),
+            inputs["builder"],
         )
 
         run, output, impl = make_forward(
