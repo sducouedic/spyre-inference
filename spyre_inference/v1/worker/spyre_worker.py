@@ -109,6 +109,13 @@ class TorchSpyreWorker(Worker):
         os.environ.setdefault("LOCAL_RANK", str(self.local_rank))
         os.environ.setdefault("LOCAL_WORLD_SIZE", str(world_size))
 
+        # flex defaults to force-synchronous launch, which blocks each launch
+        # until the stream is idle and deadlocks once two collectives are
+        # outstanding on one stream (torch-spyre#4889). An unset variable falls
+        # through to that default, so opt out by setting it empty; `setdefault`
+        # leaves an explicit value intact.
+        os.environ.setdefault("FORCE_SYNCHRONOUS_EXECUTION", "")
+
         # Trigger torch_spyre's autoload manually now that the env vars
         # are set. Autoload registers the `spyre` device and the
         # `spyreccl` distributed backend, and imports
