@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, EncoderOnlyAttentionSpec
 
 from spyre_inference import envs
-from spyre_inference.custom_ops.utils import convert
+from spyre_inference.custom_ops.utils import convert, row_outermost_layout
 from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.ops import tile_loop
 from spyre_inference.v1.attention.ops.batched_decode import batched_decode_kernel
@@ -295,7 +295,7 @@ class SpyreAttentionMetadata(AttentionMetadata):
 
     # Per-sequence padded active-block count, rounded up onto the recorder's
     # buckets; equals attention_mask_stacks[s].shape[0]. None on the sliding-window
-    # path, which is left unpadded (see build()).
+    # path, which pads to its own tighter per-bucket maximum instead (see build()).
     padded_num_blocks: list[int] | None = None
 
     # Gather indices for the paged attention loop, one row per active block:
@@ -373,6 +373,10 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         self.head_size = kv_cache_spec.head_size
         # No KV cache, so build() skips every block-, page- and tile-shaped field.
         self._encoder_only = isinstance(kv_cache_spec, EncoderOnlyAttentionSpec)
+        # Real requests satisfy query_len == seq_len <= max_model_len; build()
+        # clamps to this when a pooling model's dummy warmup batch does not.
+        self._is_pooling = vllm_config.model_config.runner_type == "pooling"
+        self._max_model_len = vllm_config.model_config.max_model_len
         self.sliding_window = getattr(kv_cache_spec, "sliding_window", None)
         if self.sliding_window is not None and self.sliding_window <= 0:
             raise ValueError(f"sliding_window must be positive, got {self.sliding_window}")
@@ -401,6 +405,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # Shared zero tiles for interior active blocks, whose mask is all-zeros.
         # Keyed by query width: a mixed batch pads its sequences to several.
         self._zero_tiles: dict[int, torch.Tensor] = {}
+        # Shared fully-masked tiles for the sliding-window path's padded blocks.
+        self._masked_tiles: dict[int, torch.Tensor] = {}
 
         static_ctx = vllm_config.compilation_config.static_forward_context
         own_layers = [static_ctx[name] for name in layer_names if name in static_ctx]
@@ -458,6 +464,40 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         )
         assert padded >= num_blocks
         return padded
+
+    def _max_active_blocks(self, num_blocks: int, aligned_query_len: int) -> int:
+        """Largest active-block count the (num_blocks, aligned_query_len) bucket admits.
+
+        ceil(kv_len / B) - floor(max(0, context_len - W + 1) / B), maximized over
+        every (kv_len, query_len) the bucket admits. The span term needs
+        aligned_query_len, not just the window: under chunked prefill a wide query
+        pushes context_len back and widens the active span.
+        """
+        if num_blocks == 0:
+            # A fully-masked padded tile would divide by a zero softmax denominator.
+            return 0
+        assert self.sliding_window is not None
+        block_size = self.block_size
+        span = self.sliding_window + aligned_query_len - 1
+        bound = min(num_blocks, (span + block_size - 1) // block_size + 1)
+        assert bound >= 1
+        return bound
+
+    def _get_masked_tile(self, aligned_query_len: int) -> torch.Tensor:
+        """Shared fully-masked tile for padded blocks, read-only like _get_zero_tile.
+
+        finfo.min rather than zeros: batched decode's mask_by_chunk copies these
+        tiles verbatim into padded slots, where a zero tile would make padding attend.
+        """
+        tile = self._masked_tiles.get(aligned_query_len)
+        if tile is None:
+            tile = torch.full(
+                (aligned_query_len, self.block_size),
+                torch.finfo(self.model_dtype).min,
+                dtype=self.model_dtype,
+            )
+            self._masked_tiles[aligned_query_len] = tile
+        return tile
 
     def _build_attention_mask(
         self,
@@ -717,6 +757,14 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         num_seqs = common_attn_metadata.num_reqs
         query_lens = query_start_loc[1 : num_seqs + 1] - query_start_loc[:num_seqs]
 
+        if self._is_pooling:
+            # Real requests satisfy query_len == seq_len <= max_model_len (see
+            # __init__); vLLM's warmup dummy batch does not, which crashes the
+            # block-count bucket lookup below for a decoder-typed layer.
+            seq_lens = seq_lens.clamp(max=self._max_model_len)
+            query_lens = query_lens.clamp(max=self._max_model_len)
+            max_seq_len = min(max_seq_len, self._max_model_len)
+
         aligned_query_lens: list[int] = []
         for query_len in query_lens.tolist():
             if query_len <= 1:
@@ -789,9 +837,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             # Sliding window: arithmetic block-skip. Blocks entirely outside
             # every query's window are dropped; interior blocks share a
             # zero mask tile; only boundary blocks get real per-query cutoffs.
-            # Left unpadded (padded_num_blocks stays None): len(active_bs) is a
-            # window-width quantity, already near-constant across decode steps.
-            # TODO: give this its own window-width buckets if it ever needs recording.
+            # The count is padded up to _max_active_blocks so it stops sliding with
+            # the context, which would compile a new kernel inside the request. Not
+            # rounded onto the num_blocks ladder: that inflates the exact per-bucket
+            # bound several-fold. padded_num_blocks stays None so forward() keeps
+            # gathering through active_block_indices.
             active_block_indices = []
             query_lens_list = query_lens.tolist()
             seq_lens_list = seq_lens.tolist()
@@ -808,11 +858,34 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     aligned_query_lens[s],
                     apply_causal_mask and aligned_query_lens[s] > 1,
                 )
+                if active_bs:
+                    # Repeat the last real block rather than inventing an index: the
+                    # column is gathered from block_table, where out-of-range would
+                    # fault. Its tile is fully masked, so the duplicate contributes
+                    # exp(finfo.min - max) == 0. Keyed on the bucket's block count,
+                    # not the sequence's, so one shape serves the whole bucket.
+                    max_active_s = self._max_active_blocks(
+                        self._pad_num_blocks((kv_len_s + block_size - 1) // block_size),
+                        aligned_query_lens[s],
+                    )
+                    # A bound below the real count would silently leave the count
+                    # sliding, i.e. the bug this padding fixes, with no signal.
+                    assert len(active_bs) <= max_active_s, (
+                        f"{len(active_bs)} active blocks exceed the bucket bound "
+                        f"{max_active_s} (kv_len={kv_len_s}, query_len={query_len_s})"
+                    )
+                    if len(active_bs) < max_active_s:
+                        masked_tile = self._get_masked_tile(aligned_query_lens[s])
+                        pad = max_active_s - len(active_bs)
+                        active_bs = active_bs + [active_bs[-1]] * pad
+                        tiles = tiles + [masked_tile] * pad
                 active_block_indices.append(active_bs)
                 # Interior blocks share one zero tile by reference; the stack copies it out.
                 attention_mask_stacks.append(
                     torch.stack(tiles)
                     if tiles
+                    # Padding an empty stack would zero the softmax denominator;
+                    # forward() writes zeros for these instead.
                     else torch.empty(0, aligned_query_lens[s], block_size, dtype=self.model_dtype)
                 )
 
@@ -896,6 +969,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     dtype=self.model_dtype,
                 )
                 for s in range(num_decode_seqs):
+                    # Under a window n_use spans the padded slots too, so they are
+                    # filled from those tiles; correct only because they are finfo.min.
                     n_use = min(blocks_per_seq[s], b_blocks)
                     if n_use:
                         mask_bs_bb[s, :n_use] = attention_mask_stacks[s][:n_use, 0]
@@ -1180,9 +1255,20 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         """
         if self._staging is None:
             shape = (self.staging_rows, self.num_heads, self.head_size)
+            layout = (
+                row_outermost_layout(shape, self.model_dtype) if device.type == "spyre" else None
+            )
             self._staging = (
-                convert(torch.zeros(shape, dtype=self.model_dtype), device, row_major=True),
-                convert(torch.zeros(shape, dtype=self.model_dtype), device, row_major=True),
+                convert(
+                    torch.zeros(shape, dtype=self.model_dtype),
+                    device,
+                    device_layout=layout,
+                ),
+                convert(
+                    torch.zeros(shape, dtype=self.model_dtype),
+                    device,
+                    device_layout=layout,
+                ),
             )
         return self._staging
 
@@ -1391,10 +1477,11 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             num_blocks=int(attn_metadata.attention_mask_stacks[0].shape[0]),
             padded_query_len=attn_metadata.aligned_query_lens[0],
         )
-        # Several requested buckets realize onto one kernel: a sliding window leaves
-        # the block count unpadded. Without a window build() rounds onto the bucketer's
-        # own buckets, so a mismatch means the two have drifted and dispatch can ask
-        # for a kernel warmup never recorded.
+        # Several requested buckets realize onto one kernel: a sliding window pads the
+        # block count to its own per-bucket maximum, below the num_blocks bucket.
+        # Without a window build() rounds onto the bucketer's own buckets, so a
+        # mismatch means the two have drifted and dispatch can ask for a kernel
+        # warmup never recorded.
         if realized != bucket and builder.sliding_window is None:
             logger.warning(
                 "Attention variant %s realized as %s without a sliding window; the "
@@ -1479,10 +1566,11 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             attn_metadata.blocks_per_chunk,
             attn_metadata.chunk_page_ids_cpu.shape[0] // attn_metadata.blocks_per_chunk,
         )
-        # Several requested buckets realize onto one kernel: a sliding window leaves
-        # the block count unpadded. Without a window build() rounds onto the bucketer's
-        # own buckets, so a mismatch means the two have drifted and dispatch can ask
-        # for a kernel warmup never recorded.
+        # Several requested buckets realize onto one kernel: a sliding window pads the
+        # block count to its own per-bucket maximum, below the num_blocks bucket.
+        # Without a window build() rounds onto the bucketer's own buckets, so a
+        # mismatch means the two have drifted and dispatch can ask for a kernel
+        # warmup never recorded.
         requested = (bucket.num_seqs, bucket.blocks_per_chunk, bucket.num_chunks)
         if realized != requested and builder.sliding_window is None:
             logger.warning(
@@ -1494,9 +1582,9 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             )
         # The kernel gathers `entries` pages per chunk, not num_blocks of them, and
         # selecting a whole source faults the device (torch-spyre#4033). A sliding
-        # window leaves the block count unpadded, so this keys on what build()
-        # realized, not the bucket's window-agnostic count, to skip only the
-        # variants dispatch cannot reach either.
+        # window pads the block count to its own tighter maximum, so this keys on
+        # what build() realized, not the bucket's window-agnostic count, to skip
+        # only the variants dispatch cannot reach either.
         if attn_metadata.padded_num_seqs * attn_metadata.blocks_per_chunk >= num_pages:
             return None
         if realized in recorded:
@@ -1815,7 +1903,13 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             if active_block_indices_all is not None:
                 active_bs = active_block_indices_all[seq_idx]
             elif padded_num_blocks is not None:
-                active_bs = list(range(padded_num_blocks[seq_idx]))
+                # Repeat the last real block rather than counting past it, as the
+                # sliding-window branch does: block_table is only
+                # ceil(max_model_len / block_size) wide, which a floored bucket exceeds.
+                real_bs = (kv_len + block_size - 1) // block_size
+                active_bs = list(range(real_bs)) + [real_bs - 1] * (
+                    padded_num_blocks[seq_idx] - real_bs
+                )
             else:
                 active_bs = list(range((kv_len + block_size - 1) // block_size))
 
