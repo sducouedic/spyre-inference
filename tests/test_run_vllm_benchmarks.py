@@ -358,7 +358,10 @@ def test_offline_tests_yaml_derives_consistently(config_file):
 
 
 def test_offline_configs_cover_the_serve_models():
-    """The offline suites benchmark what serve does, at the same context length."""
+    """The offline suites benchmark what serve does, at the same context length.
+
+    Each (model, tp) also gets a 2k entry, which serve has no trace for.
+    """
     # Only the trace-replaying entries: the encoder ones generate their prompts
     # and have no offline counterpart, since these are decode benchmarks.
     serve_points = {
@@ -382,4 +385,5 @@ def test_offline_configs_cover_the_serve_models():
             # The smoke entry has no serve counterpart by design.
             if not config["test_name"].endswith("_smoke")
         }
-        assert offline_points == serve_points, config_file.name
+        expected = serve_points | {(model, tp, 2048) for model, tp, _ in serve_points}
+        assert offline_points == expected, config_file.name
