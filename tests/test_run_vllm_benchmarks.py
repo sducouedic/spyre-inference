@@ -319,12 +319,6 @@ def test_serve_tests_yaml_derives_consistently():
             )
 
 
-# The shape each offline entry runs to approximate a trace serve replays.
-TRACE_SHAPES = {
-    "aiops": {"input_len": 1536, "output_len": 64, "max_model_len": 4096},
-    "cics": {"input_len": 4096, "output_len": 576, "max_model_len": 8192},
-}
-
 # The offline files spell input/output length under their own flag names.
 OFFLINE_LEN_KEYS = {
     LATENCY_TESTS: ("input-len", "output-len"),
@@ -352,18 +346,15 @@ def test_offline_tests_yaml_derives_consistently(config_file):
         # (ingest_vllm_benchmarks.py::_parse_input_shapes), so a name that
         # disagrees with the flags silently mislabels a trend line.
         assert f"_tp{tp}_" in name, name
-        assert f"_in{parameters[input_key]}_" in name, name
-        assert f"_out{parameters[output_key]}_" in name, name
+        shape = f"_in{parameters[input_key]}_out{parameters[output_key]}"
+        assert name.endswith((shape, f"{shape}_smoke")), name
 
-        # A `_smoke` entry is its own short shape; every other names a trace.
-        trace = name.rsplit("_", 1)[1]
-        if trace == "smoke":
+        # A `_smoke` entry is its own short shape; every other splits
+        # max-model-len evenly between prompt and output.
+        if name.endswith("_smoke"):
             continue
-        assert trace in TRACE_SHAPES, name
-        shape = TRACE_SHAPES[trace]
-        assert parameters[input_key] == shape["input_len"], name
-        assert parameters[output_key] == shape["output_len"], name
-        assert parameters["max-model-len"] == shape["max_model_len"], name
+        half = parameters["max-model-len"] // 2
+        assert parameters[input_key] == parameters[output_key] == half, name
 
 
 def test_offline_configs_cover_the_serve_models():

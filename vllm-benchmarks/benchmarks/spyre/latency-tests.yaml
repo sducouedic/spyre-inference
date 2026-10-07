@@ -1,18 +1,13 @@
-# Latency benchmarks for Spyre devices, at the shapes the agentic traces show.
+# Latency benchmarks for Spyre devices.
 #
 # Each entry under `tests` is merged over `defaults` and can override any key.
 #
-# `vllm bench latency` has no dataset support: it generates one fixed
-# input-len/output-len shape, so these entries approximate the traces the serve
-# benchmarks replay instead -- same models, same max-model-len, input/output
-# lengths at the median of each trace's replayed window:
+# Entries run the same models at the same max-model-len as the serve
+# benchmarks, splitting it evenly between prompt and output:
 #
-#   aiops (4k):  prompt p50 1476 -> in1536,  output p50 48  -> out64
-#   cics  (8k):  prompt p50 4053 -> in4096,  output p50 573 -> out576
+#   4k:  in2048, out2048
+#   8k:  in4096, out4096
 #
-# input-len is 128-aligned so the prompt fills a whole number of KV blocks.
-#
-# The trailing suffix names the trace whose shape an entry approximates, and
 # in<N>_out<N> is part of the benchmark identity downstream
 # (ingest_vllm_benchmarks.py::_parse_input_shapes), so a shape change here
 # starts a new trend line rather than bending the old one.
@@ -42,66 +37,66 @@ tests:
       num-iters-warmup: 1
       num-iters: 2
 
-  - test_name: latency_granite33-8b_tp1_in4096_out576_cics
+  - test_name: latency_granite33-8b_tp1_in4096_out4096
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct
       tensor_parallel_size: 1
       input-len: 4096
-      output-len: 576
+      output-len: 4096
       max-model-len: 8192
 
-  - test_name: latency_granite33-8b_tp4_in4096_out576_cics
+  - test_name: latency_granite33-8b_tp4_in4096_out4096
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct
       tensor_parallel_size: 4
       input-len: 4096
-      output-len: 576
+      output-len: 4096
       max-model-len: 8192
 
-  - test_name: latency_granite41-8b_tp1_in4096_out576_cics
+  - test_name: latency_granite41-8b_tp1_in4096_out4096
     parameters:
       model: ibm-granite/granite-4.1-8b
       tensor_parallel_size: 1
       input-len: 4096
-      output-len: 576
+      output-len: 4096
       max-model-len: 8192
 
-  - test_name: latency_granite41-8b_tp4_in4096_out576_cics
+  - test_name: latency_granite41-8b_tp4_in4096_out4096
     parameters:
       model: ibm-granite/granite-4.1-8b
       tensor_parallel_size: 4
       input-len: 4096
-      output-len: 576
+      output-len: 4096
       max-model-len: 8192
 
-  - test_name: latency_granite33-8b-fp8_tp4_in1536_out64_aiops
+  - test_name: latency_granite33-8b-fp8_tp4_in2048_out2048
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct-FP8
       tensor_parallel_size: 4
-      input-len: 1536
-      output-len: 64
+      input-len: 2048
+      output-len: 2048
       max-model-len: 4096
 
-  - test_name: latency_granite41-8b-fp8_tp4_in1536_out64_aiops
+  - test_name: latency_granite41-8b-fp8_tp4_in2048_out2048
     parameters:
       model: ibm-granite/granite-4.1-8b-fp8
       tensor_parallel_size: 4
-      input-len: 1536
-      output-len: 64
+      input-len: 2048
+      output-len: 2048
       max-model-len: 4096
 
-  - test_name: latency_gemma4-26b-a4b_tp1_in4096_out576_cics
+  - test_name: latency_gemma4-26b-a4b_tp1_in4096_out4096
     parameters:
       model: google/gemma-4-26B-A4B
       tensor_parallel_size: 1
       input-len: 4096
-      output-len: 576
+      output-len: 4096
       max-model-len: 8192
 
-  - test_name: latency_gemma4-26b-a4b_tp4_in4096_out576_cics
+  - test_name: latency_gemma4-26b-a4b_tp4_in4096_out4096
     parameters:
       model: google/gemma-4-26B-A4B
       tensor_parallel_size: 4
       input-len: 4096
-      output-len: 576
+      output-len: 4096
       max-model-len: 8192

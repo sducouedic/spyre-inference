@@ -23,7 +23,7 @@ Run `vllm bench latency` for a model the user names against **this** `spyre-infe
 
 - **`<model>`** (required): HF model id or locally-cached path. If omitted, default to `ibm-granite/granite-3.3-8b-instruct` and say so in the report.
 - **`--compare-main`**: after the current-branch run, run the **identical** benchmark on local `main` and print a comparison. Only when the user asks to compare.
-- Benchmark params (optional; defaults in parens): `--input-len` (4096), `--output-len` (576), `--batch-size` (1), `--max-model-len` (8192), `--num-iters` (10), `--num-iters-warmup` (2). These are the checked-in `cics` shape (`vllm-benchmarks/benchmarks/spyre/latency-tests.yaml`), so an ad-hoc run is comparable to the suite's trend line by default.
+- Benchmark params (optional; defaults in parens): `--input-len` (4096), `--output-len` (4096), `--batch-size` (1), `--max-model-len` (8192), `--num-iters` (10), `--num-iters-warmup` (2). These are the checked-in 8k shape (`vllm-benchmarks/benchmarks/spyre/latency-tests.yaml`), so an ad-hoc run is comparable to the suite's trend line by default.
 - **`--enforce-eager`**: benchmark the uncompiled path. Only pass it if the user asks — compiled (`STOCK_TORCH_COMPILE`) is the platform default.
 
 ## Steps
@@ -65,7 +65,7 @@ At the default `bs=1/in4096` the prompt no longer fits one chunk: 4096 > 512, so
 
 **KV block count** — attention specializes on the padded KV block count, which `compile_sizes` does *not* cover. It is bucketed separately (`SpyreAttnBucketer`: powers of two from `block_size` up to `--max-model-len`). With `SPYRE_ATTN_RECORD=1` (the default), warmup records per-sequence bucket pairs whose smallest real query length fits the block count, subject to allocated page capacity. When batched decode is supported, it also records variants with `padded_num_seqs * blocks_per_chunk < num_pages`. The recorded set grows with the bucket lists, but is not their full cross product. A short `SPYRE_ATTN_KV_BUCKETS` override is extended to `max_model_len`, so schedulable lengths remain covered. Setting `SPYRE_ATTN_RECORD=0` or a failed warmup recording can still cause compilation mid-window. Check the `Recorded N/M per-seq and N/M batched-decode attention variants` log line and any `failed to record` warnings.
 
-**The checked-in suite runs the trace's real decode length** (`out576`), so KV crosses a bucket boundary mid-decode. That is covered by the warmup recording above, but `--num-iters-warmup ≥ 2` is still load-bearing: the timed iterations must reuse the exact shapes warmup saw.
+**The checked-in suite decodes half of `max-model-len`** (`out4096` at 8k), so KV crosses several bucket boundaries mid-decode. That is covered by the warmup recording above, but `--num-iters-warmup ≥ 2` is still load-bearing: the timed iterations must reuse the exact shapes warmup saw.
 
 Also pass `--no-enable-prefix-caching`: with it on, timed iterations hit the cache the warmup iterations filled, so `num_computed_tokens` differs, the prefill chunks come out a different size, and that new shape re-records *inside* the measured window.
 
@@ -78,7 +78,7 @@ Report `Warmup complete in <N>s for <M> buckets` from the log so the compile sav
 Fix the params in one block so a compare run is identical, then run and read back the JSON (source of truth):
 
 ```bash
-MODEL="<model>"; INPUT_LEN=4096; OUTPUT_LEN=576; BATCH_SIZE=1
+MODEL="<model>"; INPUT_LEN=4096; OUTPUT_LEN=4096; BATCH_SIZE=1
 MAX_LEN=8192; ITERS=10; WARMUP=2; EAGER=""   # EAGER="--enforce-eager" only if asked
 TAG=branch
 OUT=.claude/skills/vllm-bench-latency/logs; mkdir -p "$OUT"   # artifacts live here, not the repo root
