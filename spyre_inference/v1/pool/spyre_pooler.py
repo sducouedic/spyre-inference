@@ -159,13 +159,18 @@ def select_rows(hidden_states: torch.Tensor, row_indices: torch.Tensor) -> torch
 
 
 class SpyreCLSPool(CLSPool):
-    """CLS via ``index_select`` (keeps upstream ``isinstance`` checks)."""
+    """CLS via ``index_select`` (keeps upstream ``isinstance`` checks).
+
+    Reads ``first_token_indices_gpu``, which the runner builds on the host. On a
+    rectangle the runner sets it to the grid rows (sequence ``i`` at row
+    ``i * extent``) and skips the unpad gather.
+    """
 
     def forward(self, hidden_states, pooling_metadata):
         cursor = pooling_metadata.get_pooling_cursor()
         if cursor.is_partial_prefill():
             raise RuntimeError("partial prefill is not supported with CLS pooling")
-        idx, n_rows = pad_row_count_to_bucket(cursor_row_indices_cpu(cursor, last=False))
+        idx, n_rows = pad_row_count_to_bucket(cursor.first_token_indices_gpu)
         pooled = select_rows(hidden_states, idx)
         return pooled[:n_rows] if pooled.shape[0] != n_rows else pooled
 
@@ -221,9 +226,9 @@ class SpyreDispatchPooler(DispatchPooler):
     ``TorchSpyreModelRunner._pool`` deliberately hands this a padded tensor in the
     first place. Undoing the slice here is what makes that intent hold.
 
-    Safe because the Spyre seqwise poolers address rows through
-    ``cursor_row_indices_cpu``, which only ever names rows inside the real range —
-    they never read the padding the slice would have removed.
+    Safe because CLS and LAST address valid rows through cursor indices (CLS uses
+    ``first_token_indices_gpu``; LAST derives indices from CPU counts), while MEAN
+    crops to the real prefix on the host. None reads trailing padding.
 
     Only the single-task-group case is handled. With several groups each one
     starts at a nonzero token offset and upstream rebases the cursor's row
