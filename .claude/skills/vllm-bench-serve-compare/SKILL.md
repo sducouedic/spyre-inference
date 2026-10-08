@@ -139,7 +139,7 @@ Per leg and config, from `<bench>/<leg>/results/`:
 
 ### 7. Report
 
-Follow [report-example.html](report-example.html): same CSS, same section order, same level of detail. Its PR and numbers are illustrative, never copy them. Save it as `bench-<tag>-<YYYY-MM-DD>.html` in `/share/sop/central_folder/bench_runs/` if that directory exists, otherwise in the bench directory. Tell the user the path.
+Follow [report-example.html](report-example.html): same CSS, same section order, same level of detail. Its PR and numbers are illustrative, never copy them. Save it as `bench-<tag>-<YYYY-MM-DD>.html` in the bench directory. Tell the user the path.
 
 - **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (cache off)."
 - **Headline tiles**: output throughput, mean ITL, mean TTFT and server startup, as the target-vs-baseline ratio or percentage. Use `tile flat` within ±2%, `tile warn` for 2–10% worse, `tile bad` for more than 10% worse.

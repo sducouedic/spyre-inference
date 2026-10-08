@@ -407,8 +407,7 @@ endif
 MODELS ?=
 TPS ?=
 BENCH_TYPES ?=
-# Directory holding the {latency,throughput,serve}-tests.yaml files to run. Point
-# it at a local directory to run custom configs instead of the CI ones.
+# Directory holding the {latency,throughput,serve}-tests.yaml files to run.
 BENCH_CONFIGS_DIR ?= vllm-benchmarks/benchmarks/spyre
 
 # The serve configs replay trace files that are not in the repo, so the fetch is
