@@ -38,6 +38,9 @@ Run every command in one shell that sourced both, in order:
 # Exists only if scripts/install-pinned-rpms.sh was run on this pod.
 [ -f "$HOME/spyre-libs/env.sh" ] && source "$HOME/spyre-libs/env.sh"
 source <spyre-inference>/.venv/bin/activate
+# The server runs `python -m` from the harness checkout, which would put that
+# checkout's spyre_inference/ ahead of the leg's installed tree on sys.path.
+export PYTHONSAFEPATH=1
 ```
 
 `uv sync --frozen` installs torch-spyre into `.venv` from the git rev pinned in `pyproject.toml` (built once, then reused from uv's wheel cache keyed by that rev), so each leg's sync installs that leg's rev.
@@ -93,7 +96,7 @@ For each leg, in order:
    UV_PROJECT_ENVIRONMENT=<spyre-inference>/.venv uv sync --frozen --project "$SRC"
    ```
 
-   Verify with `python -c "import spyre_inference; print(spyre_inference.__file__)"` and the torch-spyre rev from `python -c "import importlib.metadata as m; print(m.distribution('torch-spyre').read_text('direct_url.json'))"`.
+   Verify, from `<spyre-inference>` with `PYTHONSAFEPATH=1` set, that `python -c "import spyre_inference; print(spyre_inference.__file__)"` prints a path under `$SRC`, and check the torch-spyre rev from `python -c "import importlib.metadata as m; print(m.distribution('torch-spyre').read_text('direct_url.json'))"`.
 2. **Env.** Export the leg's env vars (the compile cache setting plus any `--env` value). Record the full env, for debugging: `env | grep -E '^(SPYRE|VLLM|TORCH|TORCHINDUCTOR|AIU|FLEX|DT|COLL|SENTIENT|OMP)_' | sort > <bench>/<leg>/env.txt`.
 3. **Versions.** Record in `<bench>/<leg>/versions.txt`: the spyre-inference sha, the torch-spyre sha, `torch.__version__`, `vllm.__version__`, and the RPMs. If `~/spyre-libs` exists, use the `[packages]` block of the `spyre-rpms.lock` it was installed from. Otherwise use `/opt/ibm/spyre/components.txt`.
 4. **Run**, from the harness checkout, in the background (serve legs take from tens of minutes to hours), and wait for completion instead of polling:
@@ -104,7 +107,7 @@ For each leg, in order:
    ```
 
    Do not set `MODELS` / `TPS`: the directory only holds the confirmed configs.
-5. **Gate the leg.** The leg is valid only if every config's result JSON has `completed == num-prompts` and `failed == 0`: `vllm bench serve` exits 0 and prints a complete-looking table even when most requests fail. If a target leg fails, keep its error for the report and go on to the next leg. If every target failed, skip the baseline.
+5. **Gate the leg.** The leg is valid only if every `spyre_inference` path in `<test_name>_server.log` (tracebacks, warnings) is under `$SRC`, and every config's result JSON has `completed == num-prompts` and `failed == 0`: `vllm bench serve` exits 0 and prints a complete-looking table even when most requests fail. If a target leg fails, keep its error for the report and go on to the next leg. If every target failed, skip the baseline.
 
 ### 5. Restore
 
