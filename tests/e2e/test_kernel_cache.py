@@ -34,7 +34,6 @@ pytestmark = pytest.mark.uses_subprocess
 _MODEL = "ibm-ai-platform/micro-g3.3-8b-instruct-1b"
 _PROMPT = "What are IBMs main businesses?"
 
-# Run by each subprocess: argv is (model, tp, prompt, output json path).
 _RUN_SCRIPT = textwrap.dedent(
     """
     import json, sys
@@ -65,7 +64,6 @@ class CacheGrewError(AssertionError):
 
 
 def _cache_entries(cache_root: Path) -> set[str]:
-    """Committed cache keys: skips in-flight ``.tmp.`` dirs and ``failed/``."""
     if not cache_root.is_dir():
         return set()
     return {
@@ -81,7 +79,6 @@ def _run(tmp_path: Path, name: str, tp: int, for_each_tile: bool, kernel_cache: 
     env.update(
         SPYRE_KERNEL_CACHE="1" if kernel_cache else "0",
         SPYRE_ATTN_FOR_EACH_TILE="1" if for_each_tile else "0",
-        # Shared by all runs, so the Spyre kernel cache persists between them.
         TORCHINDUCTOR_CACHE_DIR=str(tmp_path / "inductor"),
         VLLM_CACHE_ROOT=str(tmp_path / "vllm"),
         VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="36000",
@@ -137,14 +134,7 @@ def _run(tmp_path: Path, name: str, tp: int, for_each_tile: bool, kernel_cache: 
     ids=["tp1", "tp4"],
 )
 def test_kernel_cache(tmp_path: Path, tp: int, for_each_tile: bool) -> None:
-    """Runs the same greedy request three times, each in a fresh process:
-
-    1. cache disabled: the cache directory stays absent,
-    2. cache enabled on an empty directory: populates it,
-    3. cache enabled on the directory from (2): reuses every entry, adds none.
-
-    All three runs must produce the same output.
-    """
+    """Cache off, cold cache, warm cache: same output, and the warm run adds no entries."""
     cache_root = tmp_path / "inductor" / "inductor-spyre-cache"
 
     disabled = _run(tmp_path, "disabled", tp, for_each_tile, kernel_cache=False)

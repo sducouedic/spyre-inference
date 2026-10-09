@@ -119,9 +119,8 @@ else
         rpm2cpio "${CACHE}/$(basename "$relpath")" | (cd "$PREFIX" && cpio -idm 2>/dev/null)
     done
 
-    # No RPM owns components.txt, and the image's LIB_VERSION_FILE describes
-    # /opt/ibm/spyre, so torch-spyre's kernel cache key would ignore the lock.
-    # The cache can hold other locks' builds, so only the resolved RPMs are shown.
+    # The image's LIB_VERSION_FILE describes /opt/ibm/spyre, so the kernel cache key
+    # would ignore the lock. CACHE holds other locks' RPMs too: pass only the resolved ones.
     RESOLVED_DIR="$(mktemp -d)"
     for relpath in "${RPMS[@]}"; do
         ln -s "${CACHE}/$(basename "$relpath")" "$RESOLVED_DIR/"
