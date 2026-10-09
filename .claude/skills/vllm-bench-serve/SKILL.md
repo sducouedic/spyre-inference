@@ -1,6 +1,6 @@
 ---
 name: vllm-bench-serve-compare
-description: Benchmark decoder models with `vllm bench serve` on Spyre, comparing one or more targets (a PR, a commit, the working copy, or the same commit with different env vars) against a baseline (by default the merge base with upstream/main), then write an HTML report with every metric and everything needed to reproduce it. Picks the configs (model, TP, context length, max-num-seqs, compile cache, ...) from what the diff changes, and asks for confirmation of the legs and the configs before running. Use when the user wants to know how a PR / commit / env var affects serving performance on Spyre.
+description: Benchmark decoder models with `vllm bench serve` on Spyre, comparing one or more targets (a PR, a commit, the working copy, or the same commit with different env vars) against a baseline (by default the merge base with upstream/main), then write an HTML report with every metric and everything needed to reproduce it. Picks the configs (model, TP, context length, max-num-seqs, compile cache, ...) from what the diff changes, and asks for confirmation of the legs and the configs before running. Use when the user wants to know how a PR / commit / env var affects serving performance on Spyre. For Gemma-4 prefill (TTFT) and decode (ITL) latency measured apart, or a comparison with hf-adapters, use gemma4-benchmark-detailed instead.
 user-invocable: true
 argument-hint: "[<target>...] [--baseline <ref>] [--env KEY=v1,v2] [--detailed]"
 ---
@@ -8,6 +8,8 @@ argument-hint: "[<target>...] [--baseline <ref>] [--env KEY=v1,v2] [--detailed]"
 # Serving benchmark comparison on Spyre
 
 Run the same set of `vllm bench serve` configs on each **leg**, then report them side by side. A leg is one `(spyre-inference ref, torch-spyre rev, env vars)` triple. There are one or more **target** legs and exactly one **baseline** leg.
+
+This skill measures end-to-end serving under load. To isolate prefill time (TTFT) and decode time (ITL) with `vllm bench latency` at batch 1, and to compare spyre-inference with hf-adapters, use [gemma4-benchmark-detailed](../gemma4-benchmark-detailed/SKILL.md) instead.
 
 ## Hard constraints (do not violate)
 
