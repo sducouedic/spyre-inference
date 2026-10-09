@@ -2,7 +2,7 @@
 name: vllm-bench-serve-compare
 description: Benchmark decoder models with `vllm bench serve` on Spyre, comparing one or more targets (a PR, a commit, the working copy, or the same commit with different env vars) against a baseline (by default the merge base with upstream/main), then write an HTML report with every metric and everything needed to reproduce it. Picks the configs (model, TP, context length, max-num-seqs, compile cache, ...) from what the diff changes, and asks for confirmation of the legs and the configs before running. Use when the user wants to know how a PR / commit / env var affects serving performance on Spyre. For Gemma-4 prefill (TTFT) and decode (ITL) latency measured apart, or a comparison with hf-adapters, use gemma4-benchmark-detailed instead.
 user-invocable: true
-argument-hint: "[<target>...] [--baseline <ref>] [--env KEY=v1,v2] [--detailed]"
+argument-hint: "[<target>...] [--baseline <ref>] [--env KEY=v1,v2] [--extended]"
 ---
 
 # Serving benchmark comparison on Spyre
@@ -25,7 +25,7 @@ This skill measures end-to-end serving under load. To isolate prefill time (TTFT
 - **Targets** (positional, optional): any mix of PR numbers (`#1043` / `1043`), git refs/shas, or `.` (the working copy, including uncommitted changes). Default: `HEAD` of the current branch.
 - **`--baseline <ref>`**: default `git merge-base <first target> upstream/main` (after `git fetch upstream main`).
 - **`--env KEY=v1,v2`**: compare env var values instead of (or in addition to) commits. With a single ref, each value is one leg; the first value listed is the target, the last is the baseline. E.g. `--env SPYRE_BATCHED_DECODE=1,0`.
-- **`--detailed`**: 500 prompts instead of 100, and add configs where more than one is relevant (e.g. sweep max-num-seqs 4/8/16).
+- **`--extended`**: 1000 prompts instead of 200, and add configs where more than one is relevant (e.g. sweep max-num-seqs 4/8/16).
 - The user can override any config axis in plain words ("at tp1", "with 32k context", ...).
 
 ## Steps
@@ -67,7 +67,7 @@ Read the diff between baseline and target(s) (`git diff --stat`, then the releva
 | tensor-parallel-size | **4**; 1 when the change targets single-card execution, or both if the change touches collectives |
 | max-model-len + dataset | 4096 + `${SPYRE_AIOPS_DATASET}` for short-context changes; **8192 + `${SPYRE_CICS_DATASET}`**; 32768 + `${SPYRE_ALL_SEQUENCES_DATASET}` for long-context changes |
 | max-num-seqs | **4**; another power of two (8, 16, 32) if the change targets batching. Keep `max-concurrency` equal to it |
-| num-prompts | **100**; 500 with `--detailed` |
+| num-prompts | **200**; 1000 with `--extended` |
 | compile cache | **`SPYRE_KERNEL_CACHE=1`**, default cache path; `SPYRE_KERNEL_CACHE=0` on every leg when the change can affect compile time (more graphs, new buckets, new compiled regions, torch-spyre codegen), so the report shows the warmup cost |
 | other | any env var or server flag the change introduces or reads, e.g. a new `SPYRE_*` knob |
 
@@ -76,7 +76,7 @@ The traces need a `max-model-len` that fits them: aiops at 4k, cics at 8k, all_s
 **Gate 2**: show one line per config, then wait for the user:
 
 ```text
-serve_gemma4-26b-a4b_tp4_cics8k_bs4: gemma-4-26B-A4B, TP4, max-model-len 8192, max-num-seqs 4, concurrency 4, 100 prompts, cics, SPYRE_KERNEL_CACHE=1
+serve_gemma4-26b-a4b_tp4_cics8k_bs4: gemma-4-26B-A4B, TP4, max-model-len 8192, max-num-seqs 4, concurrency 4, 200 prompts, cics, SPYRE_KERNEL_CACHE=1
 ```
 
 ### 3. Write the bench directory
