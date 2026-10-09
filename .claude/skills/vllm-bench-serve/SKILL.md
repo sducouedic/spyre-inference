@@ -136,6 +136,30 @@ Per leg and config, from `<bench>/<leg>/results/`:
   EOF
   ```
 
+- **Init and compile times**, from `<test_name>_server.log`. Report each line that is present; leave out the lines that are missing (e.g. no attention line with `SPYRE_ATTN_RECORD=0` or `--enforce-eager`). Every TP worker logs its own times, so take the max across workers, as vLLM does for `compilation`. The counts are the same on every worker.
+    - **Init engine**: `init engine (profile, create kv cache, warmup model) took <s> s`, from vLLM `core.py`.
+    - **Total compilation**: `(compilation: <s> s)` on the same line. This is the wall time of the whole Spyre warmup (`SpyreWorker.compile_or_warm_up_model`), not just compile time. It covers the two lines below.
+    - **Model graph warmup**: `Warmup complete in <s>s for <n> buckets.`, from `SpyreModelRunner.warming_up_model`. It covers the dummy runs for each token bucket, plus the sampler row widths.
+    - **Attention graph recording**: `Attention graph recording complete: <n> graphs in <s>s.`, from `SpyreModelRunner._record_attention_graphs`. The per-layer split comes from `Recording <p> per-seq + <d> batched-decode attention variants for layer...`, which is logged once per layer: `<n> = (<p> + <d>) × layers`.
+
+  ```bash
+  python3 - <test_name>_server.log <<'EOF'
+  import re, sys
+  log = open(sys.argv[1], errors="replace").read()
+  def max_of(pat, group):
+      vals = [float(m.group(group)) for m in re.finditer(pat, log)]
+      return max(vals) if vals else None
+  init = r"init engine \(profile, create kv cache, warmup model\) took ([\d.]+) s(?: \(compilation: ([\d.]+) s)?"
+  warm = r"Warmup complete in ([\d.]+)s for (\d+) buckets"
+  attn = r"Attention graph recording complete: (\d+) graphs in ([\d.]+)s"
+  split = sorted(set(re.findall(r"Recording (\d+) per-seq \+ (\d+) batched-decode attention variants", log)))
+  print("init_engine_s", max_of(init, 1))
+  print("compilation_s", max_of(init, 2))
+  print("model_warmup_s", max_of(warm, 1), "buckets", max_of(warm, 2))
+  print("attn_record_s", max_of(attn, 2), "graphs", max_of(attn, 1), "per_seq+batched_decode per layer", split)
+  EOF
+  ```
+
 - **Compile-leak check**: `mean_itl_ms / median_itl_ms > ~1.1` points to compilation or a stall inside the measured window. Flag it in the report rather than quoting the means as a clean result.
 - On failure: the last ~50 lines of the relevant `_server.log` / `_bench.log`, and the first `Error` / `Traceback` lines.
 
@@ -146,7 +170,7 @@ Follow [report-example.html](report-example.html): same CSS, same section order,
 - **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode by batching the per-sequence KV gathers into one kernel. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (cache off)."
 - **Headline tiles**: output throughput, mean ITL, mean TTFT and server startup, as the target-vs-baseline ratio or percentage. Use `tile flat` within ±2%, `tile warn` for 2–10% worse, `tile bad` for more than 10% worse.
 - **What was compared**: one step per leg in run order: sha, label, what the leg is, env overrides, and its torch-spyre rev when it differs.
-- **Results table**: every row of the vllm bench result block, plus server startup, with one column per leg and one column group per config, and a Δ column `(target − baseline) / baseline`. Colour each Δ by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. When `SPYRE_KERNEL_CACHE=1`, mark the server startup row `unreliable` with the inline `caveat` "unreliable: kernel cache on", since the cache hit rate is unknown.
+- **Results table**: every row of the vllm bench result block, plus server startup, with one column per leg and one column group per config, and a Δ column `(target − baseline) / baseline`. Colour each Δ by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. When `SPYRE_KERNEL_CACHE=1`, mark the server startup row `unreliable` with the inline `caveat` "unreliable: kernel cache on", since the cache hit rate is unknown. Below server startup, add a "Startup and compilation" band with the init and compile times from step 6: init engine, total compilation, model graph warmup (with its bucket count) and attention graph recording (with its graph count and the per-seq + batched-decode split per layer). Leave out rows whose line is not in the log. The time rows follow the same `unreliable` rule as server startup; the count rows do not, and they get a Δ only when they differ.
 - **Leg validity**: one card per leg and config, giving completed/num-prompts and the ITL mean/median ratio. Give each failed leg an alert note with its error, and mark legs that were not run as pending.
 - **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source, and the env vars (per leg where they differ). Show only the spyre-inference vars from `env.txt`, i.e. the `SPYRE_*` keys of `environment_variables` in `spyre_inference/envs.py` (`SPYRE_KERNEL_CACHE` included), plus any `--env` var. Leave the rest of `env.txt` out of the report.
 - **Reproduction**: the `serve-tests.yaml`, the exact server and bench commands from the `.cmd` files, and the `make perf-tests` line.

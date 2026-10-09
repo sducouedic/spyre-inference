@@ -227,6 +227,14 @@
         </thead>
         <tbody>
           <tr class="unreliable"><td class="k">Server startup (s)<span class="caveat">unreliable: kernel cache on</span></td><td>xx</td><td>xx</td><td>+1.2%</td></tr>
+          <tr class="band"><td colspan="4">Startup and compilation</td></tr>
+          <tr class="unreliable"><td class="k">Init engine (s)<span class="caveat">unreliable: kernel cache on</span></td><td>xx</td><td>xx</td><td>+1.1%</td></tr>
+          <tr class="unreliable"><td class="k">Total compilation (s)<span class="caveat">unreliable: kernel cache on</span></td><td>xx</td><td>xx</td><td>+1.1%</td></tr>
+          <tr class="unreliable"><td class="k">Model graph warmup (s)<span class="caveat">unreliable: kernel cache on</span></td><td>xx</td><td>xx</td><td>−0.4%</td></tr>
+          <tr><td class="k">Model graph buckets</td><td>5</td><td>5</td><td></td></tr>
+          <tr class="unreliable"><td class="k">Attention graph recording (s)<span class="caveat">unreliable: kernel cache on</span></td><td>xx</td><td>xx</td><td>+1.5%</td></tr>
+          <tr><td class="k">Attention graphs</td><td>1440</td><td>1440</td><td></td></tr>
+          <tr><td class="k">Per layer: per-seq + batched-decode</td><td>12 + 24</td><td>12 + 24</td><td></td></tr>
           <tr class="band"><td colspan="4">Request summary</td></tr>
           <tr><td class="k">Successful requests</td><td>100</td><td>100</td><td></td></tr>
           <tr><td class="k">Failed requests</td><td>0</td><td>0</td><td></td></tr>
@@ -262,7 +270,7 @@
         </tbody>
       </table>
     </div>
-    <p>Server startup is measured from the first timestamp in <code>_server.log</code> to the last timestamp before <code>Application startup complete</code>. With <code>SPYRE_KERNEL_CACHE=1</code> it depends on how much of the cache was already populated, which is unknown, so it is not comparable between legs. Rerun with <code>SPYRE_KERNEL_CACHE=0</code> to measure it. &Delta; colours: green better, black within &plusmn;2%, orange 2&ndash;10% worse, red more than 10% worse.</p>
+    <p>Server startup is measured from the first timestamp in <code>_server.log</code> to the last timestamp before <code>Application startup complete</code>. With <code>SPYRE_KERNEL_CACHE=1</code> it depends on how much of the cache was already populated, which is unknown, so it is not comparable between legs. Rerun with <code>SPYRE_KERNEL_CACHE=0</code> to measure it. The startup and compilation rows come from <code>_server.log</code>, as the max across TP workers. Total compilation is the wall time of the whole Spyre warmup, which covers model graph warmup and attention graph recording. &Delta; colours: green better, black within &plusmn;2%, orange 2&ndash;10% worse, red more than 10% worse.</p>
   </section>
 
   <hr class="rule">
