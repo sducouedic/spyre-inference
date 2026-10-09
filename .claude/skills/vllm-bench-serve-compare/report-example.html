@@ -154,7 +154,7 @@
   <header>
     <div class="eyebrow">spyre-inference &middot; PR #XXX</div>
     <h1>PR #XXX vs main: decode optimization</h1>
-    <p class="standfirst">PR #XXX optimizes decode. On granite-3.3-8b at TP4 with the 8k cics trace, output throughput rises <strong>27%</strong> and mean ITL falls <strong>22%</strong>. Median and P99 TTFT are flat, but mean TTFT is slightly worse (+4%) and P100 TTFT regresses <strong>18%</strong>.</p>
+    <p class="standfirst">PR #XXX optimizes decode by batching the per-sequence KV gathers into one kernel. On granite-3.3-8b at TP4 with the 8k cics trace, output throughput rises <strong>27%</strong> and mean ITL falls <strong>22%</strong>. Median and P99 TTFT are flat, but mean TTFT is slightly worse (+4%) and P100 TTFT regresses <strong>18%</strong>.</p>
   </header>
 
   <dl class="meta">
@@ -304,13 +304,7 @@
     </div>
     <p>RPM source: <code>~/spyre-libs</code>, installed from <code>spyre-rpms.lock</code> (<code>[packages]</code>, x86_64). Both legs used the same env:</p>
     <pre>SPYRE_KERNEL_CACHE=1
-SPYRE_DEVICES=0,1,2,3            # derived from tensor-parallel-size
-AIU_WORLD_SIZE=4                 # derived from tensor-parallel-size
-VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3600
-VLLM_CPU_KVCACHE_SPACE=64
-DTLOG_LEVEL=error
-SPYRE_CICS_DATASET=/models/online_benchmarking_data_reordered/cics_results_2025.11.03_e2ee1b0_correct_order.jsonl
-SENTIENT_BASE_INSTALL_DIR=/home/senuser/spyre-libs/opt/ibm/spyre</pre>
+SPYRE_DEVICES=0,1,2,3            # derived from tensor-parallel-size</pre>
   </section>
 
   <section class="sec">

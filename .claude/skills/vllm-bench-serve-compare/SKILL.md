@@ -12,10 +12,10 @@ Run the same set of `vllm bench serve` configs on each **leg**, then report them
 ## Hard constraints (do not violate)
 
 - **Single accelerator, sequential only.** Never run two Spyre-backed commands at once. Legs run strictly one after another.
-- **Targets first, baseline last.** If a target leg fails, stop: do not run the baseline. Report the failure.
+- **Targets first, baseline last.** If a target leg fails, still run the other targets. Run the baseline unless every target failed. Report each failure.
 - **Identical configs and harness for every leg.** One `serve-tests.yaml` and one harness checkout serve every leg; only the installed package code (and the env vars the user asked to vary) changes between legs.
 - **Two confirmation gates.** Confirm the legs, wait for the user's answer. Then confirm the configs, wait again. Do not start any run before both are confirmed.
-- **Non-destructive.** Committed refs are benchmarked from throwaway `git worktree`s with the editable install repointed at them. Never `git checkout` / `git stash` in the user's working copy. Always restore the install at the end, even on failure.
+- **Non-destructive.** Committed refs are benchmarked from throwaway `git worktree`s, synced into the harness `.venv`. Never `git checkout` / `git stash` in the user's working copy. Always restore the install at the end, even on failure.
 - **Always report, never invent.** Every number comes from a result JSON or log. A failed leg is reported with its error, not a number.
 
 ## Inputs
@@ -33,11 +33,12 @@ Run the same set of `vllm bench serve` configs on each **leg**, then report them
 Run every command in one shell that sourced both, in order:
 
 ```bash
+# Exists only if scripts/install-pinned-rpms.sh was run on this pod.
 [ -f "$HOME/spyre-libs/env.sh" ] && source "$HOME/spyre-libs/env.sh"
 source <spyre-inference>/.venv/bin/activate
 ```
 
-`<spyre-inference>` is the user's checkout: it is the **harness checkout** for every leg. `TORCH_SPYRE_DIR` is the local torch-spyre clone (default: `../torch-spyre` next to it).
+`uv sync --frozen` installs torch-spyre into `.venv` from the git rev pinned in `pyproject.toml` (built once, then reused from uv's wheel cache keyed by that rev), so each leg's sync installs that leg's rev.
 
 ### 1. Resolve the legs
 
@@ -45,7 +46,7 @@ source <spyre-inference>/.venv/bin/activate
 2. Default target is `HEAD`. Look up its PR: `gh pr list --repo torch-spyre/spyre-inference --state all --search <sha> --json number,title,url,headRefOid`. If there is none, or more than one, ask the user. Refer to the PR number everywhere in the report.
 3. Default baseline is `git merge-base <target> upstream/main`.
 4. For each leg, read the torch-spyre rev it pins (`torch-spyre = { git = ..., rev = "<sha>" }` in that ref's `pyproject.toml`) and the vLLM rev. Also diff `spyre-rpms.lock` between legs.
-   - **torch-spyre differs between legs**: each leg gets its own build (step 4). Note each rev in the report.
+   - **torch-spyre differs between legs**: each leg installs its own rev (step 4). The first sync of a rev not yet in uv's cache builds it. Note each rev in the report.
    - **vLLM rev or `spyre-rpms.lock` differs**: stop and ask the user. Rebuilding vLLM or the RPM tree (`scripts/install-pinned-rpms.sh --rebuild`) is out of scope for an unattended run.
 5. **Gate 1**: show the legs in run order, one line each, then wait for the user:
 
@@ -60,7 +61,7 @@ Read the diff between baseline and target(s) (`git diff --stat`, then the releva
 
 | axis | choice |
 |---|---|
-| model | **`ibm-granite/granite-3.3-8b-instruct`** for a general change; `google/gemma-4-26B-A4B` for sliding window or MoE; `granite-4.1-8b` or an FP8 model when the change targets them |
+| model | **`google/gemma-4-26B-A4B`**; another decoder from `vllm-benchmarks/benchmarks/spyre/serve-tests.yaml` when the change targets it: `ibm-granite/granite-3.3-8b-instruct`, `ibm-granite/granite-4.1-8b`, or an FP8 model (`ibm-granite/granite-3.3-8b-instruct-FP8`, `ibm-granite/granite-4.1-8b-fp8`) |
 | tensor-parallel-size | **4**; 1 when the change targets single-card execution, or both if the change touches collectives |
 | max-model-len + dataset | 4096 + `${SPYRE_AIOPS_DATASET}` for short-context changes; **8192 + `${SPYRE_CICS_DATASET}`**; 32768 + `${SPYRE_ALL_SEQUENCES_DATASET}` for long-context changes |
 | max-num-seqs | **4**; another power of two (8, 16, 32) if the change targets batching. Keep `max-concurrency` equal to it |
@@ -68,12 +69,12 @@ Read the diff between baseline and target(s) (`git diff --stat`, then the releva
 | compile cache | **`SPYRE_KERNEL_CACHE=1`**, default cache path; `SPYRE_KERNEL_CACHE=0` on every leg when the change can affect compile time (more graphs, new buckets, new compiled regions, torch-spyre codegen), so the report shows the warmup cost |
 | other | any env var or server flag the change introduces or reads, e.g. a new `SPYRE_*` knob |
 
-The traces need a `max-model-len` that fits them: aiops at 4k, cics at 8k, all_sequences at 32k. `python3 .github/scripts/fetch_bench_datasets.py env` lists every available trace (truncated all_sequences variants included). When the torch-spyre rev differs between legs and the kernel cache is on, mention to the user that a kernel cached by one build may be reused by the other, and suggest `SPYRE_KERNEL_CACHE=0`.
+The traces need a `max-model-len` that fits them: aiops at 4k, cics at 8k, all_sequences at 32k. `python3 .github/scripts/fetch_bench_datasets.py env` lists every available trace (truncated all_sequences variants included).
 
 **Gate 2**: show one line per config, then wait for the user:
 
 ```text
-serve_granite33-8b_tp4_cics8k_bs4: granite-3.3-8b-instruct, TP4, max-model-len 8192, max-num-seqs 4, concurrency 4, 100 prompts, cics, SPYRE_KERNEL_CACHE=1
+serve_gemma4-26b-a4b_tp4_cics8k_bs4: gemma-4-26B-A4B, TP4, max-model-len 8192, max-num-seqs 4, concurrency 4, 100 prompts, cics, SPYRE_KERNEL_CACHE=1
 ```
 
 ### 3. Write the bench directory
@@ -84,17 +85,16 @@ Create `<spyre-inference>/../bench-<tag>/` (e.g. `bench-pr1043/`), outside the g
 
 For each leg, in order:
 
-1. **Code.** For `.`, use the working copy. Otherwise: `WT=$(mktemp -d); git worktree add --detach "$WT" <sha>`, then `uv pip install --no-deps -e "$WT"`. Verify with `python -c "import spyre_inference; print(spyre_inference.__file__)"`.
-2. **torch-spyre**, only if this leg's rev differs from the installed one. Read the installed rev from `python -c "import importlib.metadata as m; print(m.distribution('torch-spyre').read_text('direct_url.json'))"`, or from `git -C $TORCH_SPYRE_DIR rev-parse HEAD` for an editable install. If `$TORCH_SPYRE_DIR` has uncommitted changes, stop and ask. To switch revs:
+1. **Code.** For `.`, use the working copy: `SRC=<spyre-inference>`. Otherwise: `SRC=$(mktemp -d); git worktree add --detach "$SRC" <sha>`. Then sync that tree into the harness `.venv`, which installs `spyre_inference` editable from `$SRC` and the torch-spyre rev that ref pins:
 
    ```bash
-   cd "$TORCH_SPYRE_DIR" && git fetch origin <rev> && git checkout <rev> \
-     && rm -rf build torch_spyre/_C.so && uv pip install -e . --no-deps --no-build-isolation
+   UV_PROJECT_ENVIRONMENT=<spyre-inference>/.venv uv sync --frozen --project "$SRC"
    ```
 
-3. **Env.** Export the leg's env vars (the compile cache setting plus any `--env` value). Record the full relevant env: `env | grep -E '^(SPYRE|VLLM|TORCH|TORCHINDUCTOR|AIU|FLEX|DT|COLL|SENTIENT|OMP)_' | sort > <bench>/<leg>/env.txt`.
-4. **Versions.** Record in `<bench>/<leg>/versions.txt`: the spyre-inference sha, the torch-spyre sha, `torch.__version__`, `vllm.__version__`, and the RPMs. If `~/spyre-libs` exists, use the `[packages]` block of the `spyre-rpms.lock` it was installed from. Otherwise use `/opt/ibm/spyre/components.txt`.
-5. **Run**, from the harness checkout, in the background (serve legs take from tens of minutes to hours), and wait for completion instead of polling:
+   Verify with `python -c "import spyre_inference; print(spyre_inference.__file__)"` and the torch-spyre rev from `python -c "import importlib.metadata as m; print(m.distribution('torch-spyre').read_text('direct_url.json'))"`.
+2. **Env.** Export the leg's env vars (the compile cache setting plus any `--env` value). Record the full env, for debugging: `env | grep -E '^(SPYRE|VLLM|TORCH|TORCHINDUCTOR|AIU|FLEX|DT|COLL|SENTIENT|OMP)_' | sort > <bench>/<leg>/env.txt`.
+3. **Versions.** Record in `<bench>/<leg>/versions.txt`: the spyre-inference sha, the torch-spyre sha, `torch.__version__`, `vllm.__version__`, and the RPMs. If `~/spyre-libs` exists, use the `[packages]` block of the `spyre-rpms.lock` it was installed from. Otherwise use `/opt/ibm/spyre/components.txt`.
+4. **Run**, from the harness checkout, in the background (serve legs take from tens of minutes to hours), and wait for completion instead of polling:
 
    ```bash
    cd <spyre-inference> && make perf-tests BENCH_TYPES=serve \
@@ -102,11 +102,11 @@ For each leg, in order:
    ```
 
    Do not set `MODELS` / `TPS`: the directory only holds the confirmed configs.
-6. **Gate the leg.** The leg is valid only if every config's result JSON has `completed == num-prompts` and `failed == 0`: `vllm bench serve` exits 0 and prints a complete-looking table even when most requests fail. If a target leg fails, skip the remaining legs, restore (step 5) and go to the report with the error.
+5. **Gate the leg.** The leg is valid only if every config's result JSON has `completed == num-prompts` and `failed == 0`: `vllm bench serve` exits 0 and prints a complete-looking table even when most requests fail. If a target leg fails, keep its error for the report and go on to the next leg. If every target failed, skip the baseline.
 
 ### 5. Restore
 
-Always, even on failure: `uv pip install --no-deps -e <spyre-inference>`, `git worktree remove --force "$WT"` for each worktree, and put `$TORCH_SPYRE_DIR` back on the rev it had at the start (rebuild if it changed).
+Always, even on failure: `uv sync --frozen` in `<spyre-inference>` and `git worktree remove --force "$SRC"` for each worktree.
 
 ### 6. Collect
 
@@ -141,11 +141,11 @@ Per leg and config, from `<bench>/<leg>/results/`:
 
 Follow [report-example.html](report-example.html): same CSS, same section order, same level of detail. Its PR and numbers are illustrative, never copy them. Save it as `bench-<tag>-<YYYY-MM-DD>.html` in the bench directory. Tell the user the path.
 
-- **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (cache off)."
+- **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode by batching the per-sequence KV gathers into one kernel. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (cache off)."
 - **Headline tiles**: output throughput, mean ITL, mean TTFT and server startup, as the target-vs-baseline ratio or percentage. Use `tile flat` within ±2%, `tile warn` for 2–10% worse, `tile bad` for more than 10% worse.
 - **What was compared**: one step per leg in run order: sha, label, what the leg is, env overrides, and its torch-spyre rev when it differs.
 - **Results table**: every row of the vllm bench result block, plus server startup, with one column per leg and one column group per config, and a Δ column `(target − baseline) / baseline`. Colour each Δ by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. When `SPYRE_KERNEL_CACHE=1`, mark the server startup row `unreliable` with the inline `caveat` "unreliable: kernel cache on", since the cache hit rate is unknown.
 - **Leg validity**: one card per leg and config, giving completed/num-prompts and the ITL mean/median ratio. Give each failed leg an alert note with its error, and mark legs that were not run as pending.
-- **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source, and the recorded env vars (per leg where they differ).
+- **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source, and the env vars (per leg where they differ). Show only the spyre-inference vars from `env.txt`, i.e. the `SPYRE_*` keys of `environment_variables` in `spyre_inference/envs.py` (`SPYRE_KERNEL_CACHE` included), plus any `--env` var. Leave the rest of `env.txt` out of the report.
 - **Reproduction**: the `serve-tests.yaml`, the exact server and bench commands from the `.cmd` files, and the `make perf-tests` line.
 - Caveats only where they apply: n=1 per leg, different torch-spyre builds, a compile-leak flag, retried legs.
