@@ -1,5 +1,5 @@
 ---
-name: vllm-bench-serve-compare
+name: vllm-bench-serve
 description: Benchmark decoder models with `vllm bench serve` on Spyre, comparing one or more targets (a PR, a commit, the working copy, or the same commit with different env vars) against a baseline (by default the merge base with upstream/main), then write an HTML report with every metric and everything needed to reproduce it. Picks the configs (model, TP, context length, max-num-seqs, compile cache, ...) from what the diff changes, and asks for confirmation of the legs and the configs before running. Use when the user wants to know how a PR / commit / env var affects serving performance on Spyre. For Gemma-4 prefill (TTFT) and decode (ITL) latency measured apart, or a comparison with hf-adapters, use gemma4-benchmark-detailed instead.
 user-invocable: true
 argument-hint: "[<target>...] [--baseline <ref>] [--env KEY=v1,v2] [--extended]"
@@ -74,7 +74,7 @@ Read the diff between baseline and target(s) (`git diff --stat`, then the releva
 | compile cache | **`SPYRE_KERNEL_CACHE=1`**, default cache path; `SPYRE_KERNEL_CACHE=0` on every leg when the change can affect compile time (more graphs, new buckets, new compiled regions, torch-spyre codegen), so the report shows the warmup cost |
 | other | any env var or server flag the change introduces or reads, e.g. a new `SPYRE_*` knob |
 
-The traces need a `max-model-len` that fits them: aiops at 4k, cics at 8k, all_sequences at 32k. `python3 .github/scripts/fetch_bench_datasets.py env` lists every available trace (truncated all_sequences variants included).
+The traces need a `max-model-len` that fits them: aiops at 4k, cics at 8k, all_sequences at 32k.
 
 **Gate 2**: show one line per config, then wait for the user:
 
