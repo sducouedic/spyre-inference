@@ -17,7 +17,7 @@ This skill measures end-to-end serving under load. To isolate prefill time (TTFT
 - **Targets first, baseline last.** If a target leg fails, still run the other targets. Run the baseline unless every target failed. Report each failure.
 - **Identical configs and harness for every leg.** One `serve-tests.yaml` and one harness checkout serve every leg; only the installed package code (and the env vars the user asked to vary) changes between legs.
 - **Two confirmation gates.** Confirm the legs, wait for the user's answer. Then confirm the configs, wait again. Do not start any run before both are confirmed.
-- **Non-destructive.** Committed refs are benchmarked from throwaway `git worktree`s, synced into the harness `.venv`. Never `git checkout` / `git stash` in the user's working copy. Always restore the install at the end, even on failure.
+- **Non-destructive.** Committed refs are benchmarked from throwaway `git worktree`s, synced into the harness `.venv`. Never `git checkout` / `git stash` in the user's working copy. `run_leg.sh` restores the install after each leg, even on failure.
 - **Always report, never invent.** Every number comes from a result JSON or log. A failed leg is reported with its error, not a number.
 
 ## Inputs
@@ -32,16 +32,7 @@ This skill measures end-to-end serving under load. To isolate prefill time (TTFT
 
 ### 0. Environment
 
-Run every command in one shell that sourced both, in order:
-
-```bash
-# Exists only if scripts/install-pinned-rpms.sh was run on this pod.
-[ -f "$HOME/spyre-libs/env.sh" ] && source "$HOME/spyre-libs/env.sh"
-source <spyre-inference>/.venv/bin/activate
-# The server runs `python -m` from the harness checkout, which would put that
-# checkout's spyre_inference/ ahead of the leg's installed tree on sys.path.
-export PYTHONSAFEPATH=1
-```
+[scripts/run_leg.sh](scripts/run_leg.sh) sources `~/spyre-libs/env.sh` (when it exists) and `<spyre-inference>/.venv/bin/activate`, and sets `PYTHONSAFEPATH=1` so the harness checkout's `spyre_inference/` cannot shadow the leg's installed tree. Steps 1 to 3 need only git and `gh`.
 
 `uv sync --frozen` installs torch-spyre into `.venv` from the git rev pinned in `pyproject.toml` (built once, then reused from uv's wheel cache keyed by that rev), so each leg's sync installs that leg's rev.
 
@@ -88,93 +79,55 @@ Create `<spyre-inference>/../bench-<tag>/` (e.g. `bench-pr1043/`), outside the g
 
 ### 4. Run each leg (targets first)
 
-For each leg, in order:
+Run [scripts/run_leg.sh](scripts/run_leg.sh) (`<skill>` is `<spyre-inference>/.claude/skills/vllm-bench-serve`) once per leg, strictly one after another, in the background (serve legs take from tens of minutes to hours), and wait for its completion instead of polling:
 
-1. **Code.** For `.`, use the working copy: `SRC=<spyre-inference>`. Otherwise: `SRC=$(mktemp -d); git worktree add --detach "$SRC" <sha>`. Then sync that tree into the harness `.venv`, which installs `spyre_inference` editable from `$SRC` and the torch-spyre rev that ref pins:
+```bash
+<skill>/scripts/run_leg.sh --bench <bench> --leg pr1043 --ref 2a11d3b --label "PR #1043" --role target [--env KEY=VAL]...
+<skill>/scripts/run_leg.sh --bench <bench> --leg main --ref 022255a --label main --role baseline
+```
 
-   ```bash
-   UV_PROJECT_ENVIRONMENT=<spyre-inference>/.venv uv sync --frozen --project "$SRC"
-   ```
+`--ref .` benchmarks the working copy, uncommitted changes included. `SPYRE_KERNEL_CACHE=1` is set unless an `--env` gives it. For each leg the script:
 
-   Verify, from `<spyre-inference>` with `PYTHONSAFEPATH=1` set, that `python -c "import spyre_inference; print(spyre_inference.__file__)"` prints a path under `$SRC`, and check the torch-spyre rev from `python -c "import importlib.metadata as m; print(m.distribution('torch-spyre').read_text('direct_url.json'))"`.
-2. **Env.** Export the leg's env vars (the compile cache setting plus any `--env` value). Record the full env, for debugging: `env | grep -E '^(SPYRE|VLLM|TORCH|TORCHINDUCTOR|AIU|FLEX|DT|COLL|SENTIENT|OMP)_' | sort > <bench>/<leg>/env.txt`.
-3. **Versions.** Record in `<bench>/<leg>/versions.txt`: the spyre-inference sha, the torch-spyre sha, `torch.__version__`, `vllm.__version__`, and the RPMs. If `~/spyre-libs` exists, use the `[packages]` block of the `spyre-rpms.lock` it was installed from. Otherwise use `/opt/ibm/spyre/components.txt`.
-4. **Run**, from the harness checkout, in the background (serve legs take from tens of minutes to hours), and wait for completion instead of polling:
+1. Checks the ref out into a throwaway `git worktree` (`.`: the working copy itself) and runs `UV_PROJECT_ENVIRONMENT=<spyre-inference>/.venv uv sync --frozen --project <worktree>`.
+2. Fails the leg unless `spyre_inference` imports from the worktree and the installed torch-spyre rev is the one that ref pins.
+3. Exports the leg's env vars and writes `<bench>/<leg>/env.txt` (the `SPYRE|VLLM|TORCH|...` vars) and `<bench>/<leg>/leg.json`: label, role, sha, worktree path, torch-spyre, torch and vLLM versions, the RPMs and where they were read from, the `--env` overrides, host and date.
+4. Runs `make perf-tests BENCH_TYPES=serve BENCH_CONFIGS_DIR=<bench> RESULTS_DIR=<bench>/<leg>/results` from the harness checkout, logging to `<bench>/<leg>/run.log`.
+5. Gates the leg with `collect.py validate <bench> <leg>`: every config needs a result JSON with `completed == num_prompts` and `failed == 0` (`vllm bench serve` exits 0 and prints a complete-looking table even when most requests fail), and every `spyre_inference` path in its `_server.log` must be under the worktree.
+6. Always restores the install (`uv sync --frozen` in `<spyre-inference>`) and removes the worktree, even on failure or interrupt.
 
-   ```bash
-   cd <spyre-inference> && make perf-tests BENCH_TYPES=serve \
-     BENCH_CONFIGS_DIR=<bench> RESULTS_DIR=<bench>/<leg>/results 2>&1 | tee <bench>/<leg>/run.log
-   ```
+Exit 0 means the leg is valid, 1 that the run or the gate failed, and 2 a usage or setup failure. If a target leg fails, keep its error for the report and go on to the next leg. If every target failed, skip the baseline.
 
-   Do not set `MODELS` / `TPS`: the directory only holds the confirmed configs.
-5. **Gate the leg.** The leg is valid only if every `spyre_inference` path in `<test_name>_server.log` (tracebacks, warnings) is under `$SRC`, and every config's result JSON has `completed == num-prompts` and `failed == 0`: `vllm bench serve` exits 0 and prints a complete-looking table even when most requests fail. If a target leg fails, keep its error for the report and go on to the next leg. If every target failed, skip the baseline.
+### 5. Collect
 
-### 5. Restore
+```bash
+python3 <skill>/scripts/collect.py summarize <bench> --legs pr1043,main
+```
 
-Always, even on failure: `uv sync --frozen` in `<spyre-inference>` and `git worktree remove --force "$SRC"` for each worktree.
+List the targets in run order and the baseline last. A leg that did not run is reported as pending. The script writes:
 
-### 6. Collect
+- `<bench>/summary.json`, with per leg and config:
+    - every metric of the result JSON;
+    - **server startup**: from the first timestamp in `_server.log` to the last one before `Application startup complete`;
+    - **init and compile times** from `_server.log`, as the max across TP workers (each one logs its own, as vLLM does for `compilation`):
+        - `init engine (...) took <s> s (compilation: <s> s)`, from vLLM `core.py`. Compilation is the wall time of the whole Spyre warmup (`SpyreWorker.compile_or_warm_up_model`), covering the two below;
+        - `Warmup complete in <s>s for <n> buckets.`, from `SpyreModelRunner.warming_up_model`;
+        - `Attention graph recording complete: <n> graphs in <s>s.`, from `SpyreModelRunner._record_attention_graphs`, with the per-layer `<p> per-seq + <d> batched-decode` split;
+    - whether the kernel cache was on, the validity errors, the ITL mean/median ratio (`compile_leak` when it is above 1.1, which points to compilation or a stall inside the measured window), and on failure the first `Error` / `Traceback` lines and the last 50 log lines;
+    - the Δ of every row, target vs baseline, with its colour class.
+- `<bench>/results-table.html`: the results table of step 6, with the rules applied: one column group per config, baseline then each target with its Δ, rows missing from every log left out, and timing rows marked `unreliable` when the kernel cache is on.
+- `<bench>/leg-validity.html`: the leg validity cards, plus an alert note per failed leg.
 
-Per leg and config, from `<bench>/<leg>/results/`:
+Read the verbatim `Serving Benchmark Result` block from `<bench>/<leg>/results/<test_name>_bench.log`, and the exact commands from `<test_name>_server.cmd` / `<test_name>_bench.cmd`.
 
-- `<test_name>.json`: every metric of the result table.
-- `<test_name>_bench.log`: the printed `Serving Benchmark Result` block, copied verbatim into the report.
-- `<test_name>_server.cmd` / `<test_name>_bench.cmd`: the exact server and bench commands.
-- **Server startup**: the time from the first timestamp in `<test_name>_server.log` to the last timestamp before `Application startup complete`:
-
-  ```bash
-  python3 - <test_name>_server.log <<'EOF'
-  import re, sys
-  from datetime import datetime
-  ts, first = None, None
-  for line in open(sys.argv[1], errors="replace"):
-      m = re.search(r"\b(\d\d-\d\d \d\d:\d\d:\d\d)\b", line)
-      if m:
-          ts = datetime.strptime(m.group(1), "%m-%d %H:%M:%S")
-          first = first or ts
-      if "Application startup complete" in line:
-          print(f"{(ts - first).total_seconds():.0f} s"); break
-  else:
-      print("server never became ready")
-  EOF
-  ```
-
-- **Init and compile times**, from `<test_name>_server.log`. Report each line that is present; leave out the lines that are missing (e.g. no attention line with `SPYRE_ATTN_RECORD=0` or `--enforce-eager`). Every TP worker logs its own times, so take the max across workers, as vLLM does for `compilation`. The counts are the same on every worker.
-    - **Init engine**: `init engine (profile, create kv cache, warmup model) took <s> s`, from vLLM `core.py`.
-    - **Total compilation**: `(compilation: <s> s)` on the same line. This is the wall time of the whole Spyre warmup (`SpyreWorker.compile_or_warm_up_model`), not just compile time. It covers the two lines below.
-    - **Model graph warmup**: `Warmup complete in <s>s for <n> buckets.`, from `SpyreModelRunner.warming_up_model`. It covers the dummy runs for each token bucket, plus the sampler row widths.
-    - **Attention graph recording**: `Attention graph recording complete: <n> graphs in <s>s.`, from `SpyreModelRunner._record_attention_graphs`. The per-layer split comes from `Recording <p> per-seq + <d> batched-decode attention variants for layer...`, which is logged once per layer: `<n> = (<p> + <d>) × layers`.
-
-  ```bash
-  python3 - <test_name>_server.log <<'EOF'
-  import re, sys
-  log = open(sys.argv[1], errors="replace").read()
-  def max_of(pat, group):
-      vals = [float(m.group(group)) for m in re.finditer(pat, log)]
-      return max(vals) if vals else None
-  init = r"init engine \(profile, create kv cache, warmup model\) took ([\d.]+) s(?: \(compilation: ([\d.]+) s)?"
-  warm = r"Warmup complete in ([\d.]+)s for (\d+) buckets"
-  attn = r"Attention graph recording complete: (\d+) graphs in ([\d.]+)s"
-  split = sorted(set(re.findall(r"Recording (\d+) per-seq \+ (\d+) batched-decode attention variants", log)))
-  print("init_engine_s", max_of(init, 1))
-  print("compilation_s", max_of(init, 2))
-  print("model_warmup_s", max_of(warm, 1), "buckets", max_of(warm, 2))
-  print("attn_record_s", max_of(attn, 2), "graphs", max_of(attn, 1), "per_seq+batched_decode per layer", split)
-  EOF
-  ```
-
-- **Compile-leak check**: `mean_itl_ms / median_itl_ms > ~1.1` points to compilation or a stall inside the measured window. Flag it in the report rather than quoting the means as a clean result.
-- On failure: the last ~50 lines of the relevant `_server.log` / `_bench.log`, and the first `Error` / `Traceback` lines.
-
-### 7. Report
+### 6. Report
 
 Follow [report-example.html](report-example.html): same CSS, same section order, same level of detail. Its PR and numbers are illustrative, never copy them. Save it as `bench-<tag>-<YYYY-MM-DD>.html` in the bench directory. Tell the user the path.
 
 - **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode by batching the per-sequence KV gathers into one kernel. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (cache off)."
-- **Headline tiles**: output throughput, mean ITL, mean TTFT and server startup, as the target-vs-baseline ratio or percentage. Use `tile flat` within ±2%, `tile warn` for 2–10% worse, `tile bad` for more than 10% worse.
-- **What was compared**: one step per leg in run order: sha, label, what the leg is, env overrides, and its torch-spyre rev when it differs.
-- **Results table**: every row of the vllm bench result block, plus server startup, with one column per leg and one column group per config, and a Δ column `(target − baseline) / baseline`. Colour each Δ by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. When `SPYRE_KERNEL_CACHE=1`, mark the server startup row `unreliable` with the inline `caveat` "unreliable: kernel cache on", since the cache hit rate is unknown. Below server startup, add a "Startup and compilation" band with the init and compile times from step 6: init engine, total compilation, model graph warmup (with its bucket count) and attention graph recording (with its graph count and the per-seq + batched-decode split per layer). Leave out rows whose line is not in the log. The time rows follow the same `unreliable` rule as server startup; the count rows do not, and they get a Δ only when they differ.
-- **Leg validity**: one card per leg and config, giving completed/num-prompts and the ITL mean/median ratio. Give each failed leg an alert note with its error, and mark legs that were not run as pending.
-- **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source, and the env vars (per leg where they differ). Show only the spyre-inference vars from `env.txt`, i.e. the `SPYRE_*` keys of `environment_variables` in `spyre_inference/envs.py` (`SPYRE_KERNEL_CACHE` included), plus any `--env` var. Leave the rest of `env.txt` out of the report.
+- **Headline tiles**: output throughput, mean ITL, mean TTFT and server startup, as the target-vs-baseline ratio or percentage, from `deltas` in `summary.json`. Use `tile flat` within ±2%, `tile warn` for 2–10% worse, `tile bad` for more than 10% worse.
+- **What was compared**: one step per leg in run order: sha, label, what the leg is, env overrides, and its torch-spyre rev when it differs (all in `leg.json`).
+- **Results table**: paste `results-table.html` as is, then the explanatory paragraph of the example. It holds every row of the vllm bench result block, plus server startup and the "Startup and compilation" band. Its Δ is `(target − baseline) / baseline`, coloured by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. Count rows get a Δ only when they differ. With `SPYRE_KERNEL_CACHE=1`, server startup and the time rows are marked `unreliable` with the inline `caveat` "unreliable: kernel cache on", since the cache hit rate is unknown.
+- **Leg validity**: paste `leg-validity.html` (one card per leg and config, an alert note per failed leg, pending cards for legs that did not run), then the caveats note.
+- **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source (all in `leg.json`), and the env vars (per leg where they differ). Show only the spyre-inference vars from `env.txt`, i.e. the `SPYRE_*` keys of `environment_variables` in `spyre_inference/envs.py` (`SPYRE_KERNEL_CACHE` included), plus any `--env` var. Leave the rest of `env.txt` out of the report.
 - **Reproduction**: the `serve-tests.yaml`, the exact server and bench commands from the `.cmd` files, and the `make perf-tests` line.
 - Caveats only where they apply: n=1 per leg, different torch-spyre builds, a compile-leak flag, retried legs.
