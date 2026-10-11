@@ -1,5 +1,5 @@
 ---
-name: gemma4-benchmark
+name: gemma4-benchmark-detailed
 description: "Benchmark Gemma-4 26B-A4B on Spyre: hf-adapters (pinned PR #620, 9b075e4) against spyre-inference main and the spyre-inference branch under test, on the already installed environment. Two workloads on the same 1984-token prompt, each at whichever of TP1, TP2 and TP4 the user picks: the prefill TTFT of spyre-inference#1102 (the maintainer's ttft.py vs `vllm bench latency`) and decode ITL as the granite TP4 ITL report measured it ((lat64 - lat1) / 63). Every arm runs at the same TP (vLLM --tensor-parallel-size, hf-adapters under torchrun). Checks the environment read-only (pins, profiler-free build, consistent Spyre libraries, env knobs, a stale main, enough cards) and flags every inconsistency to the user instead of fixing it; never installs, syncs, rebuilds, fetches or checks anything out. Runs the arms one at a time and ends with a shareable Markdown report, TP scaling included. Use when asked to benchmark or reproduce Gemma-4 / gemma-4-26B-A4B TTFT, prefill or decode latency or ITL, at one or several tensor-parallel sizes, reproduce #1102, compare spyre-inference with hf-adapters, or measure a branch or an MoE change against main."
 ---
 
@@ -243,4 +243,4 @@ scaling included) and `report.json`, plus one `run_1102.sh` directory per combin
 ## Installing this skill on another host
 
 Copy or symlink this directory into a project's `.claude/skills/`, or into
-`~/.claude/skills/`. Keep the directory name `gemma4-benchmark`.
+`~/.claude/skills/`. Keep the directory name `gemma4-benchmark-detailed`.
