@@ -122,16 +122,16 @@ def _run(tmp_path: Path, name: str, tp: int, for_each_tile: bool, kernel_cache: 
     [
         1,
         pytest.param(
-            4,
+            2,
             marks=[
                 pytest.mark.distributed,
                 pytest.mark.skipif(
-                    spyre_device_count() < 4, reason="needs >=4 Spyre cards for TP=4"
+                    spyre_device_count() < 2, reason="needs >=2 Spyre cards for TP=2"
                 ),
             ],
         ),
     ],
-    ids=["tp1", "tp4"],
+    ids=["tp1", "tp2"],
 )
 def test_kernel_cache(tmp_path: Path, tp: int, for_each_tile: bool) -> None:
     """Cache off, cold cache, warm cache: same output, and the warm run adds no entries."""
