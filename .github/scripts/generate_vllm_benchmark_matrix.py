@@ -94,6 +94,9 @@ def generate_benchmark_matrix(benchmark_configs_dir: str, models: list[str]) -> 
     selected_models = []
 
     for file in glob.glob(f"{benchmark_configs_dir}/spyre/*.yaml"):
+        # *-dev.yaml configs are for manual runs and stay out of CI.
+        if file.endswith("-dev.yaml"):
+            continue
         with open(file) as f:
             try:
                 configs = yaml.safe_load(f)

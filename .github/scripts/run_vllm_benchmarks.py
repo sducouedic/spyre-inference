@@ -106,6 +106,14 @@ def parse_args():
         default="",
         help="comma-separated subset of latency,throughput,serve to run (empty = all)",
     )
+    parser.add_argument(
+        "--suite",
+        type=str,
+        default="",
+        help="config suite to run: empty for the CI configs (<type>-tests.yaml), "
+        "or e.g. 'dev' for <type>-tests-dev.yaml; a bench type with no file "
+        "for the suite is skipped",
+    )
     return parser.parse_args()
 
 
@@ -612,6 +620,7 @@ def main():
     except ValueError:
         log.error("--tps takes comma-separated integers, got %r", args.tps)
         sys.exit(2)
+    suffix = f"-{args.suite.strip()}" if args.suite.strip() else ""
     bench_types = {b.strip().lower() for b in args.bench_types.split(",") if b.strip()}
     unknown = bench_types - set(VALID_BENCH_TYPES)
     if unknown:
@@ -626,7 +635,7 @@ def main():
     # Run latency benchmarks
     if "latency" in bench_types:
         passed, failed = run_benchmarks_from_file(
-            config_file=configs_dir / "latency-tests.yaml",
+            config_file=configs_dir / f"latency-tests{suffix}.yaml",
             bench_type="latency",
             results_dir=results_dir,
             spyre_devices=args.spyre_devices,
@@ -640,7 +649,7 @@ def main():
     # Run throughput benchmarks
     if "throughput" in bench_types:
         passed, failed = run_benchmarks_from_file(
-            config_file=configs_dir / "throughput-tests.yaml",
+            config_file=configs_dir / f"throughput-tests{suffix}.yaml",
             bench_type="throughput",
             results_dir=results_dir,
             spyre_devices=args.spyre_devices,
@@ -654,7 +663,7 @@ def main():
     # Run serve benchmarks (after latency/throughput to avoid port conflicts)
     if "serve" in bench_types:
         passed, failed = run_serve_benchmarks_from_file(
-            config_file=configs_dir / "serve-tests.yaml",
+            config_file=configs_dir / f"serve-tests{suffix}.yaml",
             results_dir=results_dir,
             spyre_devices=args.spyre_devices,
             aiu_world_size=args.aiu_world_size,

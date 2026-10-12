@@ -21,7 +21,7 @@ VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, the bench side inherits the server's model,
 `dataset-path` expands from the environment, and a selected test whose dataset is
 absent aborts the run instead of being skipped.
 
-All three checked-in configs are loaded as-is at the end, so a config edit that
+All checked-in configs are loaded as-is at the end, so a config edit that
 breaks these invariants fails here.
 """
 
@@ -41,6 +41,8 @@ _CONFIGS = _REPO / "vllm-benchmarks" / "benchmarks" / "spyre"
 SERVE_TESTS = _CONFIGS / "serve-tests.yaml"
 LATENCY_TESTS = _CONFIGS / "latency-tests.yaml"
 THROUGHPUT_TESTS = _CONFIGS / "throughput-tests.yaml"
+LATENCY_DEV_TESTS = _CONFIGS / "latency-tests-dev.yaml"
+THROUGHPUT_DEV_TESTS = _CONFIGS / "throughput-tests-dev.yaml"
 
 
 def _write(tmp_path, raw) -> Path:
@@ -323,6 +325,8 @@ def test_serve_tests_yaml_derives_consistently():
 OFFLINE_LEN_KEYS = {
     LATENCY_TESTS: ("input-len", "output-len"),
     THROUGHPUT_TESTS: ("random-input-len", "random-output-len"),
+    LATENCY_DEV_TESTS: ("input-len", "output-len"),
+    THROUGHPUT_DEV_TESTS: ("random-input-len", "random-output-len"),
 }
 
 
@@ -357,8 +361,8 @@ def test_offline_tests_yaml_derives_consistently(config_file):
         assert parameters[input_key] == parameters[output_key] == half, name
 
 
-def test_offline_configs_cover_the_serve_models():
-    """The offline suites benchmark what serve does, at the same context length.
+def test_offline_dev_configs_cover_the_serve_models():
+    """The offline dev suites benchmark what serve does, at the same context length.
 
     Each (model, tp) also gets a 2k entry, which serve has no trace for.
     """
@@ -374,7 +378,7 @@ def test_offline_configs_cover_the_serve_models():
         if not config["parameters"]["dataset-name"].startswith("random")
     }
 
-    for config_file in OFFLINE_LEN_KEYS:
+    for config_file in (LATENCY_DEV_TESTS, THROUGHPUT_DEV_TESTS):
         offline_points = {
             (
                 runner._config_model(config),
