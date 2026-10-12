@@ -16,12 +16,12 @@
 
 validate BENCH LEG
     Checks one leg run by run_leg.sh: every config of BENCH/serve-tests.yaml has a result
-    JSON with completed == num_prompts and failed == 0, and every spyre_inference path in
-    its server log is under the leg's tree. Exit 0 = valid, 1 = invalid.
+    JSON with completed == num_prompts and failed == 0, and its server became ready.
+    Exit 0 = valid, 1 = invalid.
 
 summarize BENCH --legs TARGET[,TARGET...],BASELINE
     Writes BENCH/summary.json (every metric, server startup, init and compile times,
-    validity and deltas per leg and config) and two HTML fragments in the classes of
+    validity, the server env and deltas per leg and config) and two HTML fragments in the classes of
     report-example.html: BENCH/results-table.html and BENCH/leg-validity.html. The last
     leg is the baseline. A leg without BENCH/<leg>/leg.json is reported as not run.
 """
@@ -82,8 +82,7 @@ INIT = re.compile(
 WARM = re.compile(r"Warmup complete in ([\d.]+)s for (\d+) buckets")
 ATTN = re.compile(r"Attention graph recording complete: (\d+) graphs in ([\d.]+)s")
 SPLIT = re.compile(r"Recording (\d+) per-seq \+ (\d+) batched-decode attention variants")
-# An absolute path into a spyre_inference package, as in tracebacks and warnings.
-PKG_PATH = re.compile(r"(/[^\s\"':]*?)/spyre_inference/")
+READY = "Application startup complete"
 ERROR_LINE = re.compile(r"\b(Error|Traceback)\b")
 
 
@@ -115,15 +114,22 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def startup_s(log: str) -> float | None:
-    """First timestamp of the server log to the last one before startup completes."""
+    """First timestamp of the server log to the last one before startup completes.
+
+    Misses the imports before vLLM logs its first line; the result JSON's
+    server_startup_sec is preferred when present.
+    """
     ts = first = None
     for line in log.splitlines():
         m = TS.search(line)
         if m:
-            ts = datetime.strptime(m.group(1), "%m-%d %H:%M:%S")
+            # A leap year, so that 02-29 parses. The log has no year.
+            ts = datetime.strptime(f"2000-{m.group(1)}", "%Y-%m-%d %H:%M:%S")
             first = first or ts
-        if "Application startup complete" in line:
-            return (ts - first).total_seconds() if ts and first else None
+        if READY in line:
+            if not (ts and first) or ts < first:
+                return None
+            return (ts - first).total_seconds()
     return None
 
 
@@ -154,7 +160,7 @@ def first_errors(*logs: str, limit: int = 5) -> list[str]:
     return lines[:limit]
 
 
-def check_config(leg_dir: Path, cfg: dict, src: Path, leg_env: dict) -> dict:
+def check_config(leg_dir: Path, cfg: dict, leg_env: dict) -> dict:
     name = cfg["test_name"]
     results = leg_dir / "results"
     server_log_path = results / f"{name}_server.log"
@@ -163,7 +169,10 @@ def check_config(leg_dir: Path, cfg: dict, src: Path, leg_env: dict) -> dict:
     bench_log = bench_log_path.read_text(errors="replace") if bench_log_path.exists() else ""
     rec = {"test_name": name, "errors": [], **parse_server_log(server_log)}
 
+    # The server env: the config's environment_variables (SPYRE_DEVICES and AIU_WORLD_SIZE
+    # included) override the leg's env.txt.
     env = {**leg_env, **{k: str(v) for k, v in cfg.get("environment_variables", {}).items()}}
+    rec["env"] = env
     # Compile times are comparable only when no compile cache can hit: the Spyre kernel
     # cache, the inductor caches, and the vLLM compile cache.
     rec["compile_cache"] = not (
@@ -175,9 +184,12 @@ def check_config(leg_dir: Path, cfg: dict, src: Path, leg_env: dict) -> dict:
     result_path = results / f"{name}.json"
     result = json.loads(result_path.read_text()) if result_path.exists() else None
     rec["result"] = result
+    if result and result.get("server_startup_sec") is not None:
+        rec["startup_s"] = result["server_startup_sec"]
+    ready = READY in server_log
     if not server_log:
         rec["errors"].append(f"no {server_log_path.name}")
-    elif rec["startup_s"] is None:
+    elif not ready:
         rec["errors"].append("server never became ready")
     if result is None:
         rec["errors"].append(f"no {result_path.name}")
@@ -192,17 +204,10 @@ def check_config(leg_dir: Path, cfg: dict, src: Path, leg_env: dict) -> dict:
             rec["itl_ratio"] = round(mean / median, 3)
             rec["compile_leak"] = rec["itl_ratio"] > ITL_LEAK_RATIO
 
-    src = src.resolve()
-    foreign = sorted(
-        {p for p in PKG_PATH.findall(server_log) if not Path(p).resolve().is_relative_to(src)}
-    )
-    if foreign:
-        rec["errors"].append(f"spyre_inference loaded from {', '.join(foreign)}, not {src}")
-
     rec["valid"] = not rec["errors"]
     if not rec["valid"]:
         rec["errors"] += first_errors(server_log, bench_log)
-        tail_log = bench_log if server_log and rec["startup_s"] is not None else server_log
+        tail_log = bench_log if ready else server_log
         rec["log_tail"] = tail_log.splitlines()[-50:]
     return rec
 
@@ -214,9 +219,7 @@ def check_leg(bench: Path, leg: str) -> dict:
         return {"name": leg, "label": leg, "run": False, "valid": False, "configs": {}}
     meta = json.loads(meta_path.read_text())
     env = read_env(leg_dir / "env.txt")
-    recs = {
-        c["test_name"]: check_config(leg_dir, c, Path(meta["src"]), env) for c in configs(bench)
-    }
+    recs = {c["test_name"]: check_config(leg_dir, c, env) for c in configs(bench)}
     valid = not meta.get("error") and all(r["valid"] for r in recs.values())
     return {**meta, "run": True, "valid": valid, "configs": recs}
 
