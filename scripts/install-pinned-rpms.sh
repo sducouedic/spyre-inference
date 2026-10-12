@@ -136,8 +136,6 @@ else
     mv "${RESOLVED_DIR}/components.txt" "$COMPONENTS"
 fi
 
-[[ -d "$BASE_INSTALL_DIR" ]] || { echo "unpacked tree has no opt/ibm/spyre: $PREFIX" >&2; exit 1; }
-
 # Clearing _IBM_AIU_SETUP makes ibm-aiu-setup.sh re-derive PATH,
 # LD_LIBRARY_PATH and the *_INSTALL_DIR vars from SENTIENT_BASE_INSTALL_DIR
 # rather than keeping /opt/ibm/spyre. It reads AIU_SETUP_MULTI_AIU bare, so

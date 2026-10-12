@@ -146,31 +146,23 @@ _XFAIL_FRESH_LOWERING = pytest.mark.xfail(
 )
 
 
-@pytest.mark.timeout(3 * 1800)
+_TP2 = [
+    pytest.mark.distributed,
+    pytest.mark.skipif(spyre_device_count() < 2, reason="needs >=2 Spyre cards for TP=2"),
+]
+
+
+# The xfail cases run at TP=1 only: TP=2 would hit the same cache-key bugs. With
+# SPYRE_ATTN_FOR_EACH_TILE=1 only "shared" runs, since "fresh" would also hit the
+# fresh-lowering bug.
 @pytest.mark.parametrize(
-    ("for_each_tile", "fresh_lowering"),
+    ("tp", "for_each_tile", "fresh_lowering"),
     [
-        pytest.param(False, False, id="for_each_tile_off-shared"),
-        pytest.param(False, True, id="for_each_tile_off-fresh", marks=_XFAIL_FRESH_LOWERING),
-        pytest.param(True, False, id="for_each_tile_on-shared", marks=_XFAIL_FOR_EACH_TILE),
-        pytest.param(True, True, id="for_each_tile_on-fresh", marks=_XFAIL_FOR_EACH_TILE),
+        pytest.param(1, False, False, id="tp1-for_each_tile_off-shared"),
+        pytest.param(2, False, False, id="tp2-for_each_tile_off-shared", marks=_TP2),
+        pytest.param(1, False, True, id="tp1-for_each_tile_off-fresh", marks=_XFAIL_FRESH_LOWERING),
+        pytest.param(1, True, False, id="tp1-for_each_tile_on-shared", marks=_XFAIL_FOR_EACH_TILE),
     ],
-)
-@pytest.mark.parametrize(
-    "tp",
-    [
-        1,
-        pytest.param(
-            2,
-            marks=[
-                pytest.mark.distributed,
-                pytest.mark.skipif(
-                    spyre_device_count() < 2, reason="needs >=2 Spyre cards for TP=2"
-                ),
-            ],
-        ),
-    ],
-    ids=["tp1", "tp2"],
 )
 def test_kernel_cache(tmp_path: Path, tp: int, for_each_tile: bool, fresh_lowering: bool) -> None:
     """Cache off, cold cache, warm cache: same output, and the warm run adds no entries.
@@ -188,11 +180,11 @@ def test_kernel_cache(tmp_path: Path, tp: int, for_each_tile: bool, fresh_loweri
     cold_entries = _cache_entries(cache_root)
     assert cold_entries, "cold run did not populate the kernel cache"
     assert not (cache_root / "failed").exists(), "cold run left failed compiles"
+    assert cold == disabled, "cold-cache output differs from the uncached output"
 
     warm, warm_log = _run(tmp_path, "warm", *args, kernel_cache=True)
     # A run that bypasses the cache also adds no entries, so check it was consulted.
     assert _CACHE_DISABLED_MSG not in warm_log, "warm run did not use the kernel cache"
-    assert cold == disabled, "cold-cache output differs from the uncached output"
     assert warm == disabled, "warm-cache output differs from the uncached output"
 
     new_entries = _cache_entries(cache_root) - cold_entries
