@@ -37,6 +37,13 @@ _spec = importlib.util.spec_from_file_location("run_vllm_benchmarks", _SCRIPT)
 runner = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(runner)
 
+_MATRIX_SCRIPT = _REPO / ".github" / "scripts" / "generate_vllm_benchmark_matrix.py"
+_matrix_spec = importlib.util.spec_from_file_location(
+    "generate_vllm_benchmark_matrix", _MATRIX_SCRIPT
+)
+matrix = importlib.util.module_from_spec(_matrix_spec)
+_matrix_spec.loader.exec_module(matrix)
+
 _CONFIGS = _REPO / "vllm-benchmarks" / "benchmarks" / "spyre"
 SERVE_TESTS = _CONFIGS / "serve-tests.yaml"
 LATENCY_TESTS = _CONFIGS / "latency-tests.yaml"
@@ -122,7 +129,7 @@ def test_defaults_are_not_shared_between_tests(tmp_path):
 
 
 def test_bare_list_still_loads(tmp_path):
-    """A file with no `defaults` mapping still loads, as older configs were."""
+    """A bare list with no `defaults` mapping still loads."""
     path = _write(
         tmp_path, [{"test_name": "t", "parameters": {"model": "m", "tensor_parallel_size": 2}}]
     )
@@ -275,6 +282,52 @@ def test_model_filter_is_case_insensitive(tmp_path):
     runner._derive_config(configs[0])
 
     assert len(runner._select_configs(configs, {"ibm-granite/x"}, set())) == 1
+
+
+@pytest.mark.parametrize(
+    ("suite", "expected"),
+    [("", "latency-tests.yaml"), ("dev", "latency-tests-dev.yaml")],
+)
+def test_suite_selects_config_file(tmp_path, suite, expected):
+    files = runner._suite_config_files(tmp_path, suite, {"latency"})
+
+    assert files == {"latency": tmp_path / expected}
+
+
+def test_unknown_suite_aborts_the_run(monkeypatch, tmp_path):
+    (tmp_path / "latency-tests-dev.yaml").write_text("[]")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_vllm_benchmarks.py",
+            "--configs-dir",
+            str(tmp_path),
+            "--results-dir",
+            str(tmp_path / "results"),
+            "--suite",
+            "devs",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        runner.main()
+    assert exc.value.code == 2
+
+
+def test_matrix_skips_dev_configs(tmp_path):
+    spyre = tmp_path / "spyre"
+    spyre.mkdir()
+    for name, model in [
+        ("latency-tests.yaml", "ci-model"),
+        ("latency-tests-dev.yaml", "dev-model"),
+    ]:
+        (spyre / name).write_text(
+            yaml.safe_dump([{"test_name": "t", "parameters": {"model": model}}])
+        )
+
+    result = matrix.generate_benchmark_matrix(str(tmp_path), [])
+
+    assert result["include"] == [{"models": "ci-model"}]
 
 
 # ── the checked-in config ──

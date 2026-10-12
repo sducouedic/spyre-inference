@@ -1,16 +1,17 @@
 # Spyre vLLM benchmarks
 
 Benchmark configs for the `vLLM Benchmark` CI workflow and for local runs on
-Spyre hardware. Each config file under `benchmarks/spyre/` holds a `defaults`
-mapping and a `tests` list, and each test entry is merged over `defaults` so it
-only spells out what differs; one entry per `(model, shape)`:
+Spyre hardware. Each config file under `benchmarks/spyre/` is either a YAML list
+of test entries or a `defaults` mapping plus a `tests` list, where each test
+entry is merged over `defaults` so it only spells out what differs; one entry
+per `(model, shape)`:
 
 - `latency-tests.yaml` → `vllm bench latency`
 - `throughput-tests.yaml` → `vllm bench throughput`
 - `serve-tests.yaml` → `vllm bench serve` (starts a server, waits for health,
   then benchmarks against it)
 
-`latency-tests-dev.yaml` and `throughput-tests-dev.yaml` are not run in CI. They run the offline benchmarks at the serve context lengths, which takes hours per model, so run them on your own pod with `make perf-tests BENCH_SUITE=dev`. `SPYRE_DEVICES` / `AIU_WORLD_SIZE` are derived from each entry's tensor-parallel size rather than spelled out per test.
+`latency-tests-dev.yaml` and `throughput-tests-dev.yaml` are not run in CI. They run the offline benchmarks at the serve context lengths, which takes hours per model, so run them on your own pod with `make perf-tests BENCH_SUITE=dev`, which skips the serve trace fetch. `SPYRE_DEVICES` / `AIU_WORLD_SIZE` are derived from each entry's tensor-parallel size rather than spelled out per test.
 
 Serve entries replay a recorded agentic trace: real router prompts, each request keeping the output length it actually produced, in recorded order. A trace rather than a fixed prompt shape is what makes prefill chunking, prefix reuse, and KV-block pressure visible. A serve entry's trailing suffix names the trace it replays.
 

@@ -412,7 +412,8 @@ BENCH_SUITE ?=
 
 # The serve configs replay trace files that are not in the repo, so the fetch is
 # what makes a serve config runnable at all and is on by default. Set
-# FETCH_BENCH_DATA=0 on a host that already has the traces mounted.
+# FETCH_BENCH_DATA=0 on a host that already has the traces mounted. A named
+# BENCH_SUITE has no serve config, so it skips the fetch by default.
 #
 # The script writes `export SPYRE_*_DATASET=...` lines to stdout and its
 # diagnostics to stderr, so capture stdout to a file and source that rather than
@@ -421,7 +422,7 @@ BENCH_SUITE ?=
 # exports nothing for that artifact; run_vllm_benchmarks.py then fails by name
 # for the configs that actually need it and runs the rest. The `&&` still matters
 # for the case the script really does fail, e.g. a corrupt cache under `verify`.
-FETCH_BENCH_DATA ?= 1
+FETCH_BENCH_DATA ?= $(if $(strip $(BENCH_SUITE)),0,1)
 ifeq ($(strip $(FETCH_BENCH_DATA)),0)
 BENCH_DATA_CMD := true
 else
