@@ -39,7 +39,7 @@ sys.path.insert(0, str(REPO / ".github" / "scripts"))
 from run_vllm_benchmarks import _load_configs  # noqa: E402
 
 # (key, label, kind, timing). kind: lower / higher is better, count (Δ only when the
-# values differ, never coloured) or text. timing rows are unreliable with the kernel cache on.
+# values differ, never coloured) or text. timing rows are unreliable while any compile cache is on.
 STARTUP_ROWS = [
     ("startup_s", "Server startup (s)", "lower", True),
     None,
@@ -71,7 +71,7 @@ LATENCY_BANDS = [
     ("e2el", "End-to-end latency", "E2EL"),
 ]
 SECONDS = {"startup_s", "init_engine_s", "compilation_s", "model_warmup_s", "attn_record_s"}
-CACHE_CAVEAT = '<span class="caveat">unreliable: kernel cache on</span>'
+CACHE_CAVEAT = '<span class="caveat">unreliable: compile cache on</span>'
 ITL_LEAK_RATIO = 1.1
 
 TS = re.compile(r"\b(\d\d-\d\d \d\d:\d\d:\d\d)\b")
@@ -163,10 +163,14 @@ def check_config(leg_dir: Path, cfg: dict, src: Path, leg_env: dict) -> dict:
     bench_log = bench_log_path.read_text(errors="replace") if bench_log_path.exists() else ""
     rec = {"test_name": name, "errors": [], **parse_server_log(server_log)}
 
-    cache = cfg.get("environment_variables", {}).get(
-        "SPYRE_KERNEL_CACHE", leg_env.get("SPYRE_KERNEL_CACHE", "0")
+    env = {**leg_env, **{k: str(v) for k, v in cfg.get("environment_variables", {}).items()}}
+    # Compile times are comparable only when no compile cache can hit: the Spyre kernel
+    # cache, the inductor caches, and the vLLM compile cache.
+    rec["compile_cache"] = not (
+        env.get("SPYRE_KERNEL_CACHE", "0") != "1"
+        and env.get("TORCHINDUCTOR_FORCE_DISABLE_CACHES") == "1"
+        and env.get("VLLM_DISABLE_COMPILE_CACHE") == "1"
     )
-    rec["kernel_cache"] = str(cache) == "1"
 
     result_path = results / f"{name}.json"
     result = json.loads(result_path.read_text()) if result_path.exists() else None
@@ -325,7 +329,7 @@ def render_table(legs, base, cfgs) -> str:
         if all(value(leg, n, key) is None for leg in legs for n in names):
             continue
         cache_on = timing and any(
-            (leg["configs"].get(n) or {}).get("kernel_cache") for leg in legs for n in names
+            (leg["configs"].get(n) or {}).get("compile_cache") for leg in legs for n in names
         )
         cells = []
         for n in names:

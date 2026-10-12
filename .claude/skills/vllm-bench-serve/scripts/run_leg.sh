@@ -10,7 +10,9 @@
 #   --ref REF     git ref or sha; "." for the working copy, uncommitted changes included
 #   --label TEXT  leg name in the report (default: NAME)
 #   --role ROLE   target (default) or baseline
-#   --env K=V     env var for this leg, repeatable; SPYRE_KERNEL_CACHE=1 unless given
+#   --env K=V     env var for this leg, repeatable; SPYRE_KERNEL_CACHE=1 unless given. With
+#                 SPYRE_KERNEL_CACHE=0, TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 and
+#                 VLLM_DISABLE_COMPILE_CACHE=1 are also set unless given, so nothing is cached
 # Writes DIR/NAME/{leg.json,env.txt,sync.log,run.log,results/}.
 # Exit: 0 valid leg; 1 the run or the validity check failed; 2 bad usage or setup failure.
 set -uo pipefail
@@ -120,9 +122,17 @@ else
   RPMS=$(python -c "import json, sys; print(json.dumps(dict(l.strip().split(':', 1) for l in open(sys.argv[1]) if ':' in l)))" "$RPMS_SOURCE")
 fi
 
-has_cache=0
-for kv in "${ENVS[@]}"; do [[ $kv == SPYRE_KERNEL_CACHE=* ]] && has_cache=1; done
-[ $has_cache = 1 ] || ENVS+=("SPYRE_KERNEL_CACHE=1")
+# Adds K=V to ENVS unless an --env already gives K.
+default_env() {
+  local kv
+  for kv in "${ENVS[@]}"; do [[ $kv == "${1%%=*}"=* ]] && return; done
+  ENVS+=("$1")
+}
+default_env SPYRE_KERNEL_CACHE=1
+if printf '%s\n' "${ENVS[@]}" | grep -qx 'SPYRE_KERNEL_CACHE=0'; then
+  default_env TORCHINDUCTOR_FORCE_DISABLE_CACHES=1
+  default_env VLLM_DISABLE_COMPILE_CACHE=1
+fi
 for kv in "${ENVS[@]}"; do export "${kv?}"; done
 env | grep -E '^(SPYRE|VLLM|TORCH|TORCHINDUCTOR|AIU|FLEX|DT|COLL|SENTIENT|OMP)_' | sort >"$OUT/env.txt"
 write_meta "${ENVS[@]}"
