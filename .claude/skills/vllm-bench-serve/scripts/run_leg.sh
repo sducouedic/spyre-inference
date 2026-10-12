@@ -99,7 +99,8 @@ UV_PROJECT_ENVIRONMENT="$REPO/.venv" uv sync --frozen --project "$SRC" >"$OUT/sy
   || fail "uv sync failed, see $OUT/sync.log"
 
 cd "$REPO" || fail "cannot cd to $REPO"
-PKG=$(python -c "import os, spyre_inference; print(os.path.realpath(spyre_inference.__file__))") \
+# Importing the plugin logs to stdout, so keep only the last line.
+PKG=$(python -c "import os, spyre_inference; print(os.path.realpath(spyre_inference.__file__))" | tail -n1) \
   || fail "cannot import spyre_inference"
 case "$PKG" in
   "$(realpath "$SRC")"/*) ;;
@@ -109,7 +110,7 @@ export TS_PIN TS_REV LEG_TORCH LEG_VLLM RPMS_SOURCE RPMS
 TS_PIN=$(python -c "import sys, tomllib; print(tomllib.load(open(sys.argv[1], 'rb'))['tool']['uv']['sources']['torch-spyre']['rev'])" "$SRC/pyproject.toml")
 TS_REV=$(python -c "import importlib.metadata as m, json; print(json.loads(m.distribution('torch-spyre').read_text('direct_url.json') or '{}').get('vcs_info', {}).get('commit_id', 'unknown'))")
 [ "$TS_PIN" = "$TS_REV" ] || fail "torch-spyre $TS_REV is installed, but $REF pins $TS_PIN"
-LEG_TORCH=$(python -c "import torch; print(torch.__version__)")
+LEG_TORCH=$(python -c "import torch; print(torch.__version__)" | tail -n1)
 LEG_VLLM=$(python -c "import importlib.metadata as m; print(m.version('vllm'))")
 if [ -d "$HOME/spyre-libs" ]; then
   RPMS_SOURCE="[packages] of $REF:spyre-rpms.lock, installed in ~/spyre-libs"
