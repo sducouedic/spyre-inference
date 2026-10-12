@@ -59,6 +59,10 @@ _RUN_SCRIPT = textwrap.dedent(
 )
 
 
+# torch-spyre logs this when it cannot compute a cache key and compiles uncached.
+_CACHE_DISABLED_MSG = "Kernel cache disabled"
+
+
 class CacheGrewError(AssertionError):
     """The populated-cache run added entries; the only failure the xfail accepts."""
 
@@ -69,11 +73,22 @@ def _cache_entries(cache_root: Path) -> set[str]:
     return {
         p.name
         for p in cache_root.iterdir()
-        if p.is_dir() and ".tmp." not in p.name and p.name != "failed"
+        if p.is_dir()
+        and ".tmp." not in p.name
+        and not p.name.endswith(".tmp")
+        and p.name != "failed"
     }
 
 
-def _run(tmp_path: Path, name: str, tp: int, for_each_tile: bool, kernel_cache: bool) -> dict:
+def _run(
+    tmp_path: Path,
+    name: str,
+    tp: int,
+    for_each_tile: bool,
+    fresh_lowering: bool,
+    kernel_cache: bool,
+) -> tuple[dict, str]:
+    """Run one generation in a fresh process; return its output and its log."""
     env = dict(os.environ)
     env.pop("TORCHINDUCTOR_FORCE_DISABLE_CACHES", None)
     env.update(
@@ -83,39 +98,63 @@ def _run(tmp_path: Path, name: str, tp: int, for_each_tile: bool, kernel_cache: 
         VLLM_CACHE_ROOT=str(tmp_path / "vllm"),
         VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="36000",
     )
-    out_path = tmp_path / f"{name}.json"
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", _RUN_SCRIPT, _MODEL, str(tp), _PROMPT, str(out_path)],
-            env=env,
-            check=False,
+    if fresh_lowering:
+        # Leave the Spyre kernel cache as the only state shared between runs, so
+        # every run lowers the model again, as after a code change.
+        env.update(
+            TORCHINDUCTOR_FX_GRAPH_CACHE="0",
+            TORCHINDUCTOR_AUTOGRAD_CACHE="0",
+            VLLM_CACHE_ROOT=str(tmp_path / f"vllm-{name}"),
         )
+    out_path = tmp_path / f"{name}.json"
+    log_path = tmp_path / f"{name}.log"
+    try:
+        with open(log_path, "w") as log:
+            proc = subprocess.run(
+                [sys.executable, "-c", _RUN_SCRIPT, _MODEL, str(tp), _PROMPT, str(out_path)],
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
     finally:
         freed = wait_until_card_free(exclude_pids={os.getpid()}, timeout=60)
-    assert proc.returncode == 0, f"{name} run exited with {proc.returncode}"
+    log_text = log_path.read_text()
+    assert proc.returncode == 0, (
+        f"{name} run exited with {proc.returncode}; log tail:\n{log_text[-5000:]}"
+    )
     assert freed, f"Spyre devices were not released after the {name} run"
-    return json.loads(out_path.read_text())
+    return json.loads(out_path.read_text()), log_text
+
+
+_XFAIL_FOR_EACH_TILE = pytest.mark.xfail(
+    strict=True,
+    raises=CacheGrewError,
+    reason=(
+        "torch-spyre#5199: with SPYRE_ATTN_FOR_EACH_TILE=1 (the default) some cache keys "
+        "are not stable across processes, so the populated-cache run compiles part of the "
+        "kernels again"
+    ),
+)
+_XFAIL_FRESH_LOWERING = pytest.mark.xfail(
+    strict=True,
+    raises=CacheGrewError,
+    reason=(
+        "when vLLM and Inductor lower the model again, some cache keys (fused RMSNorm+mm, "
+        "attention) differ from the previous process, so those kernels compile again"
+    ),
+)
 
 
 @pytest.mark.timeout(3 * 1800)
 @pytest.mark.parametrize(
-    "for_each_tile",
+    ("for_each_tile", "fresh_lowering"),
     [
-        False,
-        pytest.param(
-            True,
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=CacheGrewError,
-                reason=(
-                    "with SPYRE_ATTN_FOR_EACH_TILE=1 some cache keys are not stable "
-                    "across processes, so the populated-cache run compiles part of the "
-                    "kernels again"
-                ),
-            ),
-        ),
+        pytest.param(False, False, id="for_each_tile_off-shared"),
+        pytest.param(False, True, id="for_each_tile_off-fresh", marks=_XFAIL_FRESH_LOWERING),
+        pytest.param(True, False, id="for_each_tile_on-shared", marks=_XFAIL_FOR_EACH_TILE),
+        pytest.param(True, True, id="for_each_tile_on-fresh", marks=_XFAIL_FOR_EACH_TILE),
     ],
-    ids=["for_each_tile_off", "for_each_tile_on"],
 )
 @pytest.mark.parametrize(
     "tp",
@@ -133,19 +172,26 @@ def _run(tmp_path: Path, name: str, tp: int, for_each_tile: bool, kernel_cache: 
     ],
     ids=["tp1", "tp2"],
 )
-def test_kernel_cache(tmp_path: Path, tp: int, for_each_tile: bool) -> None:
-    """Cache off, cold cache, warm cache: same output, and the warm run adds no entries."""
-    cache_root = tmp_path / "inductor" / "inductor-spyre-cache"
+def test_kernel_cache(tmp_path: Path, tp: int, for_each_tile: bool, fresh_lowering: bool) -> None:
+    """Cache off, cold cache, warm cache: same output, and the warm run adds no entries.
 
-    disabled = _run(tmp_path, "disabled", tp, for_each_tile, kernel_cache=False)
+    ``shared`` keeps the vLLM and Inductor graph caches across runs, so the warm run
+    reuses the cold run's lowered graph; ``fresh`` lowers the model again in every run.
+    """
+    cache_root = tmp_path / "inductor" / "inductor-spyre-cache"
+    args = (tp, for_each_tile, fresh_lowering)
+
+    disabled, _ = _run(tmp_path, "disabled", *args, kernel_cache=False)
     assert not _cache_entries(cache_root), "cache populated with SPYRE_KERNEL_CACHE=0"
 
-    cold = _run(tmp_path, "cold", tp, for_each_tile, kernel_cache=True)
+    cold, _ = _run(tmp_path, "cold", *args, kernel_cache=True)
     cold_entries = _cache_entries(cache_root)
     assert cold_entries, "cold run did not populate the kernel cache"
     assert not (cache_root / "failed").exists(), "cold run left failed compiles"
 
-    warm = _run(tmp_path, "warm", tp, for_each_tile, kernel_cache=True)
+    warm, warm_log = _run(tmp_path, "warm", *args, kernel_cache=True)
+    # A run that bypasses the cache also adds no entries, so check it was consulted.
+    assert _CACHE_DISABLED_MSG not in warm_log, "warm run did not use the kernel cache"
     assert cold == disabled, "cold-cache output differs from the uncached output"
     assert warm == disabled, "warm-cache output differs from the uncached output"
 

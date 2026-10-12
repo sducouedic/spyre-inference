@@ -112,23 +112,28 @@ else
         mv "${CACHE}/${filename}.part" "${CACHE}/${filename}"
     done
 
-    # Unpack into an empty tree so a previous lock's libraries cannot linger.
-    rm -rf "$PREFIX"
-    mkdir -p "$PREFIX"
-    for relpath in "${RPMS[@]}"; do
-        rpm2cpio "${CACHE}/$(basename "$relpath")" | (cd "$PREFIX" && cpio -idm 2>/dev/null)
-    done
-
     # The image's LIB_VERSION_FILE describes /opt/ibm/spyre, so the kernel cache key
-    # would ignore the lock. CACHE holds other locks' RPMs too: pass only the resolved ones.
+    # would ignore the lock. CACHE holds other locks' RPMs too: pass only the resolved
+    # ones. Written before the wipe so a failure here leaves PREFIX untouched.
     RESOLVED_DIR="$(mktemp -d)"
+    trap 'rm -rf "$RESOLVED_DIR"' EXIT
     for relpath in "${RPMS[@]}"; do
         ln -s "${CACHE}/$(basename "$relpath")" "$RESOLVED_DIR/"
     done
     python3 "${REPO_ROOT}/.github/scripts/write_components_file.py" \
-        --lock "$LOCK" --rpm-dir "$RESOLVED_DIR" --arch "$ARCH" --output "$COMPONENTS"
-    rm -rf "$RESOLVED_DIR"
+        --lock "$LOCK" --rpm-dir "$RESOLVED_DIR" --arch "$ARCH" \
+        --output "${RESOLVED_DIR}/components.txt"
+
+    # Unpack into an empty tree so a previous lock's libraries cannot linger. The
+    # stamp goes in first so a failed unpack can be redone; COMPONENTS marks completion.
+    rm -rf "$PREFIX"
+    mkdir -p "$PREFIX"
     echo "$LOCK_SHA" > "$STAMP"
+    for relpath in "${RPMS[@]}"; do
+        rpm2cpio "${CACHE}/$(basename "$relpath")" | (cd "$PREFIX" && cpio -idm 2>/dev/null)
+    done
+    [[ -d "$BASE_INSTALL_DIR" ]] || { echo "unpacked tree has no opt/ibm/spyre: $PREFIX" >&2; exit 1; }
+    mv "${RESOLVED_DIR}/components.txt" "$COMPONENTS"
 fi
 
 [[ -d "$BASE_INSTALL_DIR" ]] || { echo "unpacked tree has no opt/ibm/spyre: $PREFIX" >&2; exit 1; }
