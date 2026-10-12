@@ -413,7 +413,8 @@ BENCH_SUITE ?=
 # The serve configs replay trace files that are not in the repo, so the fetch is
 # what makes a serve config runnable at all and is on by default. Set
 # FETCH_BENCH_DATA=0 on a host that already has the traces mounted. A named
-# BENCH_SUITE has no serve config, so it skips the fetch by default.
+# BENCH_SUITE skips the fetch by default, since no suite has a serve config yet;
+# a suite that adds a serve-tests-<suite>.yaml must set FETCH_BENCH_DATA=1.
 #
 # The script writes `export SPYRE_*_DATASET=...` lines to stdout and its
 # diagnostics to stderr, so capture stdout to a file and source that rather than
