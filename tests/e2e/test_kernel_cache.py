@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -59,6 +60,10 @@ _RUN_SCRIPT = textwrap.dedent(
 )
 
 
+# One run takes 2-4 min. Bounding each run lets a hung child be killed and the
+# cards released before pytest-timeout ends the whole process.
+_RUN_TIMEOUT_S = 600
+
 # torch-spyre logs this when it cannot compute a cache key and compiles uncached.
 _CACHE_DISABLED_MSG = "Kernel cache disabled"
 
@@ -90,7 +95,14 @@ def _run(
 ) -> tuple[dict, str]:
     """Run one generation in a fresh process; return its output and its log."""
     env = dict(os.environ)
-    env.pop("TORCHINDUCTOR_FORCE_DISABLE_CACHES", None)
+    # Inherited cache switches would change what "shared" and "fresh" mean.
+    for var in (
+        "TORCHINDUCTOR_FORCE_DISABLE_CACHES",
+        "TORCHINDUCTOR_FX_GRAPH_CACHE",
+        "TORCHINDUCTOR_AUTOGRAD_CACHE",
+        "VLLM_DISABLE_COMPILE_CACHE",
+    ):
+        env.pop(var, None)
     env.update(
         SPYRE_KERNEL_CACHE="1" if kernel_cache else "0",
         SPYRE_ATTN_FOR_EACH_TILE="1" if for_each_tile else "0",
@@ -108,18 +120,29 @@ def _run(
         )
     out_path = tmp_path / f"{name}.json"
     log_path = tmp_path / f"{name}.log"
+    timed_out = False
     try:
         with open(log_path, "w") as log:
-            proc = subprocess.run(
+            # A new session lets a timeout kill the EngineCore and TP workers too.
+            proc = subprocess.Popen(
                 [sys.executable, "-c", _RUN_SCRIPT, _MODEL, str(tp), _PROMPT, str(out_path)],
                 env=env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                check=False,
+                start_new_session=True,
             )
+            try:
+                proc.wait(timeout=_RUN_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
     finally:
         freed = wait_until_card_free(exclude_pids={os.getpid()}, timeout=60)
     log_text = log_path.read_text()
+    assert not timed_out, (
+        f"{name} run timed out after {_RUN_TIMEOUT_S}s; log tail:\n{log_text[-5000:]}"
+    )
     assert proc.returncode == 0, (
         f"{name} run exited with {proc.returncode}; log tail:\n{log_text[-5000:]}"
     )
@@ -155,6 +178,7 @@ _TP2 = [
 # The xfail cases run at TP=1 only: TP=2 would hit the same cache-key bugs. With
 # SPYRE_ATTN_FOR_EACH_TILE=1 only "shared" runs, since "fresh" would also hit the
 # fresh-lowering bug.
+@pytest.mark.timeout(3 * (_RUN_TIMEOUT_S + 60) + 120)
 @pytest.mark.parametrize(
     ("tp", "for_each_tile", "fresh_lowering"),
     [
