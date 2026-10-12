@@ -62,7 +62,7 @@ Read the diff between baseline and target(s) (`git diff --stat`, then the releva
 | max-model-len + dataset | 4096 + `${SPYRE_AIOPS_DATASET}` for short-context changes; **8192 + `${SPYRE_CICS_DATASET}`**; 32768 + `${SPYRE_ALL_SEQUENCES_DATASET}` for long-context changes |
 | max-num-seqs | **4**; another power of two (8, 16, 32) if the change targets batching. Keep `max-concurrency` equal to it |
 | num-prompts | **200**; 1000 with `--extended` |
-| compile cache | **`SPYRE_KERNEL_CACHE=1`**, default cache path; `SPYRE_KERNEL_CACHE=0` on every leg when the change can affect compile time (more graphs, new buckets, new compiled regions, torch-spyre codegen), so the report shows the warmup cost |
+| compile cache | **`SPYRE_KERNEL_CACHE=1`**, default cache path; all caches off on every leg when the change can affect compile time (more graphs, new buckets, new compiled regions, torch-spyre codegen), so the report shows the warmup cost: `SPYRE_KERNEL_CACHE=0`, which makes `run_leg.sh` also set `TORCHINDUCTOR_FORCE_DISABLE_CACHES=1` (inductor FX graph, AOTAutograd and autotune caches) and `VLLM_DISABLE_COMPILE_CACHE=1`. `SPYRE_KERNEL_CACHE=0` alone still lets the inductor and vLLM caches hit and shrink compile time |
 | other | any env var or server flag the change introduces or reads, e.g. a new `SPYRE_*` knob |
 
 The traces need a `max-model-len` that fits them: aiops at 4k, cics at 8k, all_sequences at 32k.
@@ -75,7 +75,7 @@ serve_gemma4-26b-a4b_tp4_cics8k_bs4: gemma-4-26B-A4B, TP4, max-model-len 8192, m
 
 ### 3. Write the bench directory
 
-Create `<spyre-inference>/../bench-<tag>/` (e.g. `bench-pr1043/`), outside the git tree so it survives worktree swaps. Write `serve-tests.yaml` there in the same `defaults`/`tests` format as `vllm-benchmarks/benchmarks/spyre/serve-tests.yaml`: copy its `defaults` block, then one entry per confirmed config. Give TP4 and 32k entries `server_health_timeout: 3600`, and double it when the kernel cache is off. `test_name` must be unique per config; the leg is encoded in the results directory, not the name.
+Create `<spyre-inference>/../bench-<tag>/` (e.g. `bench-pr1043/`), outside the git tree so it survives worktree swaps. Write `serve-tests.yaml` there in the same `defaults`/`tests` format as `vllm-benchmarks/benchmarks/spyre/serve-tests.yaml`: copy its `defaults` block, then one entry per confirmed config. Give TP4 and 32k entries `server_health_timeout: 3600`, and double it when the caches are off. `test_name` must be unique per config; the leg is encoded in the results directory, not the name.
 
 ### 4. Run each leg (targets first)
 
@@ -86,7 +86,7 @@ Run [scripts/run_leg.sh](scripts/run_leg.sh) (`<skill>` is `<spyre-inference>/.c
 <skill>/scripts/run_leg.sh --bench <bench> --leg main --ref 022255a --label main --role baseline
 ```
 
-`--ref .` benchmarks the working copy, uncommitted changes included. `SPYRE_KERNEL_CACHE=1` is set unless an `--env` gives it. For each leg the script:
+`--ref .` benchmarks the working copy, uncommitted changes included. `SPYRE_KERNEL_CACHE=1` is set unless an `--env` gives it. With `SPYRE_KERNEL_CACHE=0`, `TORCHINDUCTOR_FORCE_DISABLE_CACHES=1` and `VLLM_DISABLE_COMPILE_CACHE=1` are also set unless an `--env` gives them. For each leg the script:
 
 1. Checks the ref out into a throwaway `git worktree` (`.`: the working copy itself) and runs `UV_PROJECT_ENVIRONMENT=<spyre-inference>/.venv uv sync --frozen --project <worktree>`.
 2. Fails the leg unless `spyre_inference` imports from the worktree and the installed torch-spyre rev is the one that ref pins.
@@ -112,9 +112,9 @@ List the targets in run order and the baseline last. A leg that did not run is r
         - `init engine (...) took <s> s (compilation: <s> s)`, from vLLM `core.py`. Compilation is the wall time of the whole Spyre warmup (`SpyreWorker.compile_or_warm_up_model`), covering the two below;
         - `Warmup complete in <s>s for <n> buckets.`, from `SpyreModelRunner.warming_up_model`;
         - `Attention graph recording complete: <n> graphs in <s>s.`, from `SpyreModelRunner._record_attention_graphs`, with the per-layer `<p> per-seq + <d> batched-decode` split;
-    - whether the kernel cache was on, the validity errors, the ITL mean/median ratio (`compile_leak` when it is above 1.1, which points to compilation or a stall inside the measured window), and on failure the first `Error` / `Traceback` lines and the last 50 log lines;
+    - whether any compile cache was on (`compile_cache`: false only with `SPYRE_KERNEL_CACHE=0`, `TORCHINDUCTOR_FORCE_DISABLE_CACHES=1` and `VLLM_DISABLE_COMPILE_CACHE=1`), the validity errors, the ITL mean/median ratio (`compile_leak` when it is above 1.1, which points to compilation or a stall inside the measured window), and on failure the first `Error` / `Traceback` lines and the last 50 log lines;
     - the Δ of every row, target vs baseline, with its colour class.
-- `<bench>/results-table.html`: the results table of step 6, with the rules applied: one column group per config, baseline then each target with its Δ, rows missing from every log left out, and timing rows marked `unreliable` when the kernel cache is on.
+- `<bench>/results-table.html`: the results table of step 6, with the rules applied: one column group per config, baseline then each target with its Δ, rows missing from every log left out, and timing rows marked `unreliable` when any compile cache is on.
 - `<bench>/leg-validity.html`: the leg validity cards, plus an alert note per failed leg.
 
 Read the verbatim `Serving Benchmark Result` block from `<bench>/<leg>/results/<test_name>_bench.log`, and the exact commands from `<test_name>_server.cmd` / `<test_name>_bench.cmd`.
@@ -123,11 +123,11 @@ Read the verbatim `Serving Benchmark Result` block from `<bench>/<leg>/results/<
 
 Follow [report-example.html](report-example.html): same CSS, same section order, same level of detail. Its PR and numbers are illustrative, never copy them. Save it as `bench-<tag>-<YYYY-MM-DD>.html` in the bench directory. Tell the user the path.
 
-- **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode by batching the per-sequence KV gathers into one kernel. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (cache off)."
+- **TL;DR** (header standfirst): 1-3 sentences. Say what is benchmarked and against what, and give the main observations, e.g. "PR #XXX optimizes decode by batching the per-sequence KV gathers into one kernel. Output throughput +30%, mean ITL −50%, TTFT flat, but server startup doubles (caches off)."
 - **Headline tiles**: output throughput, mean ITL, mean TTFT and server startup, as the target-vs-baseline ratio or percentage, from `deltas` in `summary.json`. Use `tile flat` within ±2%, `tile warn` for 2–10% worse, `tile bad` for more than 10% worse.
 - **What was compared**: one step per leg in run order: sha, label, what the leg is, env overrides, and its torch-spyre rev when it differs (all in `leg.json`).
-- **Results table**: paste `results-table.html` as is, then the explanatory paragraph of the example. It holds every row of the vllm bench result block, plus server startup and the "Startup and compilation" band. Its Δ is `(target − baseline) / baseline`, coloured by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. Count rows get a Δ only when they differ. With `SPYRE_KERNEL_CACHE=1`, server startup and the time rows are marked `unreliable` with the inline `caveat` "unreliable: kernel cache on", since the cache hit rate is unknown.
+- **Results table**: paste `results-table.html` as is, then the explanatory paragraph of the example. It holds every row of the vllm bench result block, plus server startup and the "Startup and compilation" band. Its Δ is `(target − baseline) / baseline`, coloured by whether it is better for that metric (lower is better for latencies and duration, higher for throughputs): `d-good` for better by ≥2%, no class within ±2%, `d-warn` for 2–10% worse, `d-bad` for more than 10% worse. Count rows get a Δ only when they differ. Unless all compile caches are off, server startup and the time rows are marked `unreliable` with the inline `caveat` "unreliable: compile cache on", since the cache hit rate is unknown.
 - **Leg validity**: paste `leg-validity.html` (one card per leg and config, an alert note per failed leg, pending cards for legs that did not run), then the caveats note.
-- **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source (all in `leg.json`), and the env vars (per leg where they differ). Show only the spyre-inference vars from `env.txt`, i.e. the `SPYRE_*` keys of `environment_variables` in `spyre_inference/envs.py` (`SPYRE_KERNEL_CACHE` included), plus any `--env` var. Leave the rest of `env.txt` out of the report.
+- **Environment**: date, host, spyre-inference and torch-spyre sha per leg, torch, vLLM, the RPMs and their source (all in `leg.json`), and the env vars (per leg where they differ). Show only the spyre-inference vars from `env.txt`, i.e. the `SPYRE_*` keys of `environment_variables` in `spyre_inference/envs.py` (`SPYRE_KERNEL_CACHE` included), plus `TORCHINDUCTOR_FORCE_DISABLE_CACHES`, `VLLM_DISABLE_COMPILE_CACHE` and any `--env` var. Leave the rest of `env.txt` out of the report.
 - **Reproduction**: the `serve-tests.yaml`, the exact server and bench commands from the `.cmd` files, and the `make perf-tests` line.
 - Caveats only where they apply: n=1 per leg, different torch-spyre builds, a compile-leak flag, retried legs.
