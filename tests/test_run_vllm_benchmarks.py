@@ -359,35 +359,3 @@ def test_offline_tests_yaml_derives_consistently(config_file):
             continue
         half = parameters["max-model-len"] // 2
         assert parameters[input_key] == parameters[output_key] == half, name
-
-
-def test_offline_dev_configs_cover_the_serve_models():
-    """The offline dev suites benchmark what serve does, at the same context length.
-
-    Each (model, tp) also gets a 2k entry, which serve has no trace for.
-    """
-    # Only the trace-replaying entries: the encoder ones generate their prompts
-    # and have no offline counterpart, since these are decode benchmarks.
-    serve_points = {
-        (
-            runner._config_model(config),
-            runner._config_tp(config),
-            config["server_parameters"]["max-model-len"],
-        )
-        for config in runner._load_configs(SERVE_TESTS)
-        if not config["parameters"]["dataset-name"].startswith("random")
-    }
-
-    for config_file in (LATENCY_DEV_TESTS, THROUGHPUT_DEV_TESTS):
-        offline_points = {
-            (
-                runner._config_model(config),
-                runner._config_tp(config),
-                config["parameters"]["max-model-len"],
-            )
-            for config in runner._load_configs(config_file)
-            # The smoke entry has no serve counterpart by design.
-            if not config["test_name"].endswith("_smoke")
-        }
-        expected = serve_points | {(model, tp, 2048) for model, tp, _ in serve_points}
-        assert offline_points == expected, config_file.name

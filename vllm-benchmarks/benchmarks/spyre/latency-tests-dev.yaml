@@ -58,6 +58,8 @@ tests:
       max-model-len: 8192
 
   - test_name: latency_granite33-8b_tp4_in1024_out1024
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct
       tensor_parallel_size: 4
@@ -66,6 +68,8 @@ tests:
       max-model-len: 2048
 
   - test_name: latency_granite33-8b_tp4_in4096_out4096
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct
       tensor_parallel_size: 4
@@ -90,6 +94,8 @@ tests:
       max-model-len: 8192
 
   - test_name: latency_granite41-8b_tp4_in1024_out1024
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-4.1-8b
       tensor_parallel_size: 4
@@ -98,6 +104,8 @@ tests:
       max-model-len: 2048
 
   - test_name: latency_granite41-8b_tp4_in4096_out4096
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-4.1-8b
       tensor_parallel_size: 4
@@ -106,6 +114,8 @@ tests:
       max-model-len: 8192
 
   - test_name: latency_granite33-8b-fp8_tp4_in1024_out1024
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct-FP8
       tensor_parallel_size: 4
@@ -114,6 +124,8 @@ tests:
       max-model-len: 2048
 
   - test_name: latency_granite33-8b-fp8_tp4_in2048_out2048
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-3.3-8b-instruct-FP8
       tensor_parallel_size: 4
@@ -122,6 +134,8 @@ tests:
       max-model-len: 4096
 
   - test_name: latency_granite41-8b-fp8_tp4_in1024_out1024
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-4.1-8b-fp8
       tensor_parallel_size: 4
@@ -130,6 +144,8 @@ tests:
       max-model-len: 2048
 
   - test_name: latency_granite41-8b-fp8_tp4_in2048_out2048
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: ibm-granite/granite-4.1-8b-fp8
       tensor_parallel_size: 4
@@ -154,6 +170,8 @@ tests:
       max-model-len: 8192
 
   - test_name: latency_gemma4-26b-a4b_tp4_in1024_out1024
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: google/gemma-4-26B-A4B
       tensor_parallel_size: 4
@@ -161,8 +179,9 @@ tests:
       output-len: 1024
       max-model-len: 2048
 
-
   - test_name: latency_gemma4-26b-a4b_tp4_in4096_out4096
+    environment_variables:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3600'
     parameters:
       model: google/gemma-4-26B-A4B
       tensor_parallel_size: 4
