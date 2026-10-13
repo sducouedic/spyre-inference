@@ -230,15 +230,17 @@ jobs:
         run: |
           set -eux
 
-          JSON_COUNT=$(find benchmark-results -name "*.pytorch.json" 2>/dev/null | wc -l || echo 0)
-          echo "PyTorch JSON result files found: ${JSON_COUNT}"
+          # Count the native results: vLLM writes no .pytorch.json for pooling models
+          # (embedding, reranker), and extract_rows reads their metrics from the native file.
+          JSON_COUNT=$(find benchmark-results -name "*.json" ! -name "*.pytorch.json" 2>/dev/null | wc -l || echo 0)
+          echo "Benchmark JSON result files found: ${JSON_COUNT}"
 
           if [[ "${JSON_COUNT}" -eq 0 ]]; then
             if [[ "${BENCH_STATE}" == "failed" ]]; then
               echo "No benchmark completed; nothing to ingest."
               exit 0
             fi
-            echo "No PyTorch benchmark result files found; failing ClickHouse ingest."
+            echo "No benchmark result files found; failing ClickHouse ingest."
             exit 1
           fi
 
@@ -263,7 +265,7 @@ jobs:
           MATRIX_MODELS: ${{ matrix.models }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          RESULT_COUNT=$(find benchmark-results -name "*.pytorch.json" 2>/dev/null | wc -l || echo 0)
+          RESULT_COUNT=$(find benchmark-results -name "*.json" ! -name "*.pytorch.json" 2>/dev/null | wc -l || echo 0)
 
           {
             echo "### Benchmark Results"
