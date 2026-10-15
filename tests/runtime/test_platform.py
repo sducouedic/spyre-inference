@@ -647,6 +647,29 @@ def test_worker_reasserts_recompile_limits_after_autoload():
     assert src.index("torch_spyre._autoload()") < src.index("_raise_dynamo_recompile_limits()")
 
 
+@pytest.mark.parametrize(("inherited", "expected"), [(None, "1"), ("0", "0")])
+def test_scan_graph_caching_default(inherited, expected):
+    """Importing the plugin turns on scan-graph caching, unless the user set it."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "TORCH_SPYRE_CACHE_SCAN"}
+    if inherited is not None:
+        env["TORCH_SPYRE_CACHE_SCAN"] = inherited
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, spyre_inference; print(os.environ['TORCH_SPYRE_CACHE_SCAN'])",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.splitlines()[-1] == expected
+
+
 def test_compile_sizes_default_generated():
     """Defaults are powers of two up to max_num_seqs, plus one prefill bucket."""
     from spyre_inference.platform import TorchSpyrePlatform

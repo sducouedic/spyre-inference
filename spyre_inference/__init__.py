@@ -25,6 +25,11 @@ from typing import Any
 # library can't load before init_device runs.
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
 
+# Let the Inductor FX graph and AOTAutograd caches keep `for_each_tile` (`scan`)
+# graphs, so attention does not compile again in every new process. Read by the
+# deferred `torch_spyre._autoload` above.
+os.environ.setdefault("TORCH_SPYRE_CACHE_SCAN", "1")
+
 __version__ = importlib.metadata.version("spyre_inference")
 
 
