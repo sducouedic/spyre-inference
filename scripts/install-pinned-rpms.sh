@@ -143,16 +143,19 @@ fi
 
 # DT_RPATH is searched before LD_LIBRARY_PATH, so /opt/ibm/spyre entries would bind
 # the system libraries. Rewritten entries no longer match, so this runs every time
-# to also fix trees unpacked before the rewrite existed.
-PATCHELF="$(command -v patchelf || uvx --from patchelf bash -c 'command -v patchelf')" || {
-    echo "patchelf not found and could not be fetched with uvx" >&2
-    exit 1
-}
+# to also fix trees unpacked before the rewrite existed. readelf does the detection,
+# so a run with nothing left to rewrite does not need patchelf.
+PATCHELF=""
 while IFS= read -r -d '' f; do
     [[ "$(head -c4 "$f")" == $'\x7fELF' ]] || continue
-    # Static ELF files have no dynamic section, so --print-rpath fails on them.
-    rpath="$("$PATCHELF" --print-rpath "$f" 2>/dev/null)" || continue
+    rpath="$(readelf -d "$f" 2>/dev/null | sed -n 's/.*Library r\(un\)\?path: \[\(.*\)\]$/\2/p')"
     [[ ":$rpath" == *:/opt/ibm/spyre* ]] || continue
+    if [[ -z "$PATCHELF" ]]; then
+        PATCHELF="$(command -v patchelf || uvx --from patchelf bash -c 'command -v patchelf')" || {
+            echo "patchelf not found and could not be fetched with uvx" >&2
+            exit 1
+        }
+    fi
     new_rpath=":${rpath}"
     new_rpath="${new_rpath//:\/opt\/ibm\/spyre/:"${BASE_INSTALL_DIR}"}"
     "$PATCHELF" --force-rpath --set-rpath "${new_rpath#:}" "$f"
