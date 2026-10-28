@@ -20,6 +20,7 @@ and executes them.
 """
 
 import contextlib
+import importlib.util
 import json
 import logging
 import os
@@ -43,25 +44,18 @@ log = logging.getLogger(__name__)
 # Valid environment variable name pattern
 ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 
-# Fallbacks for the dataset env vars the configs reference, matching the layout
-# on the Spyre benchmark hosts.
-DATASET_PATH_DEFAULTS = {
-    "SPYRE_AIOPS_DATASET": (
-        "/models/online_benchmarking_data_reordered/"
-        "aiops_results_2025.11.03_e2ee1b0_correct_order.jsonl"
-    ),
-    "SPYRE_CICS_DATASET": (
-        "/models/online_benchmarking_data_reordered/"
-        "cics_results_2025.11.03_e2ee1b0_correct_order.jsonl"
-    ),
-    "SPYRE_ALL_SEQUENCES_DATASET": (
-        "/models/online_benchmarking_data_reordered/"
-        "all_sequences_2025.11.03_e2ee1b0_correct_order.jsonl"
-    ),
-    "SPYRE_VISION_DATASET": (
-        "/models/online_benchmarking_data_reordered/wdu_combined_article_payload_fixed.jsonl"
-    ),
-}
+# The dataset fetcher owns the artifact table and cache layout. The scripts are
+# not a package, so load it by path.
+_FETCH_SCRIPT = Path(__file__).resolve().parent / "fetch_bench_datasets.py"
+_fetch_spec = importlib.util.spec_from_file_location("fetch_bench_datasets", _FETCH_SCRIPT)
+fetch_bench_datasets = importlib.util.module_from_spec(_fetch_spec)
+_fetch_spec.loader.exec_module(fetch_bench_datasets)
+
+
+def _dataset_path_defaults() -> dict[str, str]:
+    """Fallbacks for the dataset env vars: each artifact's place in the fetch cache."""
+    cache = fetch_bench_datasets.cache_dir()
+    return {var: str(cache / spec["path"]) for var, spec in fetch_bench_datasets.ARTIFACTS.items()}
 
 
 def parse_args():
@@ -155,7 +149,7 @@ def _resolve_dataset_path(config: dict) -> None:
     path = parameters.get("dataset-path")
     if not path:
         return
-    env = {**DATASET_PATH_DEFAULTS, **os.environ}
+    env = {**_dataset_path_defaults(), **os.environ}
     parameters["dataset-path"] = string.Template(str(path)).safe_substitute(env)
 
 
@@ -201,9 +195,9 @@ def _select_configs(configs: list, models: set[str], tps: set[int]) -> list:
         for test_name, path in missing_datasets:
             log.error("%s needs dataset %s, which is not present on this host", test_name, path)
         log.error(
-            "Point SPYRE_AIOPS_DATASET / SPYRE_CICS_DATASET / SPYRE_ALL_SEQUENCES_DATASET "
-            "/ SPYRE_VISION_DATASET at this host's copies of the trace files, or mount "
-            "them at the paths above."
+            "Run `make perf-tests` (it fetches the trace files), or point the "
+            "SPYRE_*_DATASET variables or SPYRE_BENCH_DATA_DIR at existing copies. "
+            "SPYRE_VISION_DATASET has no default and must be set explicitly."
         )
         sys.exit(2)
     return selected
