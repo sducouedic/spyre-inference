@@ -44,8 +44,7 @@ log = logging.getLogger(__name__)
 # Valid environment variable name pattern
 ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 
-# The dataset fetcher owns the artifact table and cache layout. The scripts are
-# not a package, so load it by path.
+# The scripts are not a package, so load the fetcher by path.
 _FETCH_SCRIPT = Path(__file__).resolve().parent / "fetch_bench_datasets.py"
 _fetch_spec = importlib.util.spec_from_file_location("fetch_bench_datasets", _FETCH_SCRIPT)
 fetch_bench_datasets = importlib.util.module_from_spec(_fetch_spec)
@@ -53,7 +52,6 @@ _fetch_spec.loader.exec_module(fetch_bench_datasets)
 
 
 def _dataset_path_defaults() -> dict[str, str]:
-    """Fallbacks for the dataset env vars: each artifact's place in the fetch cache."""
     cache = fetch_bench_datasets.cache_dir()
     return {var: str(cache / spec["path"]) for var, spec in fetch_bench_datasets.ARTIFACTS.items()}
 
