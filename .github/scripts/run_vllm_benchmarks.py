@@ -47,6 +47,7 @@ ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 # The scripts are not a package, so load the fetcher by path.
 _FETCH_SCRIPT = Path(__file__).resolve().parent / "fetch_bench_datasets.py"
 _fetch_spec = importlib.util.spec_from_file_location("fetch_bench_datasets", _FETCH_SCRIPT)
+assert _fetch_spec and _fetch_spec.loader
 fetch_bench_datasets = importlib.util.module_from_spec(_fetch_spec)
 _fetch_spec.loader.exec_module(fetch_bench_datasets)
 
@@ -182,20 +183,23 @@ def _select_configs(configs: list, models: set[str], tps: set[int]) -> list:
         if tps and tp not in tps:
             log.info("Skipping %s (tp %d not selected)", config.get("test_name"), tp)
             continue
+        raw_path = str(config.get("parameters", {}).get("dataset-path", ""))
         _resolve_dataset_path(config)
         missing = _missing_dataset(config)
         if missing:
-            missing_datasets.append((config.get("test_name"), missing))
+            missing_datasets.append((config.get("test_name"), missing, raw_path))
             continue
         selected.append(config)
 
     if missing_datasets:
-        for test_name, path in missing_datasets:
+        dataset_vars = set()
+        for test_name, path, raw_path in missing_datasets:
             log.error("%s needs dataset %s, which is not present on this host", test_name, path)
+            dataset_vars.update(string.Template(raw_path).get_identifiers())
         log.error(
-            "Run `make perf-tests` (it fetches the trace files), or point the "
-            "SPYRE_*_DATASET variables or SPYRE_BENCH_DATA_DIR at existing copies. "
-            "SPYRE_VISION_DATASET has no default and must be set explicitly."
+            "Export %s to existing copies of the trace files, or run `make perf-tests` "
+            "with FETCH_BENCH_DATA=1 to fetch them into SPYRE_BENCH_DATA_DIR.",
+            " / ".join(sorted(dataset_vars)) or "the SPYRE_*_DATASET variables",
         )
         sys.exit(2)
     return selected
