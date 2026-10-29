@@ -308,11 +308,7 @@ def build_env_vars(env_config: dict) -> dict[str, str]:
 
 
 def bench_env(env_config: dict, spyre_devices: str, aiu_world_size: str) -> tuple[dict, dict]:
-    """The full environment of a benchmark process, and the config's own part of it.
-
-    The CLI device values are only a base: env_config carries the per-test values
-    from _derive_config and is applied last, so it wins.
-    """
+    """The benchmark process env, and the config's own part of it (applied last, so it wins)."""
     env = os.environ.copy()
     env["SPYRE_DEVICES"] = spyre_devices
     env["AIU_WORLD_SIZE"] = aiu_world_size
@@ -451,11 +447,7 @@ def running_server(
     log_name: str,
     health_timeout: int,
 ):
-    """Start `vllm serve` and wait for /health; kill it on exit.
-
-    Yields the startup time in seconds, or None if the server died or did not
-    become healthy in time. Its command and output go to `<log_name>.cmd/.log`.
-    """
+    """Start `vllm serve`; yield its seconds to healthy /health (None on failure), then kill it."""
     server_params = dict(server_parameters)
     model = server_params.pop("model")
     host = str(server_params.get("host", "127.0.0.1"))
@@ -626,8 +618,7 @@ def run_serve_benchmarks_from_file(
     return passed, failed
 
 
-# Inherited switches that would stop the warmup runs from writing or reading
-# the compile cache under test.
+# Inherited switches that would keep warmup runs off the compile cache under test.
 CACHE_DISABLING_ENV_VARS = (
     "TORCHINDUCTOR_FORCE_DISABLE_CACHES",
     "TORCHINDUCTOR_FX_GRAPH_CACHE",
@@ -692,7 +683,7 @@ def run_warmup_benchmark(
     (results_dir / f"{test_name}.json").write_text(
         json.dumps({"model": model, **startup_sec}, indent=2)
     )
-    # Written under the same switch as vLLM's own: it is what the ingest reads.
+    # Same switch as vLLM's own .pytorch.json, which is what the ingest reads.
     if os.environ.get("SAVE_TO_PYTORCH_BENCHMARK_FORMAT"):
         (results_dir / f"{test_name}.pytorch.json").write_text(
             json.dumps(_pytorch_records(model, server_parameters, startup_sec), indent=2)
@@ -843,7 +834,6 @@ def main():
             total_passed += passed
             total_failed += failed
 
-    # Run warmup benchmarks (each starts its own servers, like serve)
     if "warmup" in bench_types:
         passed, failed = run_warmup_benchmarks_from_file(
             config_file=config_files["warmup"],
