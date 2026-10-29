@@ -345,6 +345,13 @@ def test_warmup_times_cold_then_populated_on_one_fresh_cache(monkeypatch, tmp_pa
     @runner.contextlib.contextmanager
     def fake_server(server_parameters, env, config_env, results_dir, log_name, health_timeout):
         starts.append((log_name, env))
+        cache = Path(env["TORCHINDUCTOR_CACHE_DIR"])
+        if len(starts) == 1:
+            (cache / "kernels").mkdir(parents=True)
+            for i in range(3):
+                (cache / "kernels" / f"k{i}").touch()
+        else:
+            (cache / "late").touch()
         yield 100.0 if len(starts) == 1 else 10.0
 
     monkeypatch.setattr(runner, "running_server", fake_server)
@@ -371,12 +378,16 @@ def test_warmup_times_cold_then_populated_on_one_fresh_cache(monkeypatch, tmp_pa
     assert json.loads((tmp_path / "warmup_m_tp1.json").read_text()) == {
         "model": "m",
         "cold_cache_startup_sec": 100.0,
+        "cold_cache_new_files": 3,
         "populated_cache_startup_sec": 10.0,
+        "populated_cache_new_files": 1,
     }
     records = json.loads((tmp_path / "warmup_m_tp1.pytorch.json").read_text())
     assert {r["metric"]["name"]: r["metric"]["benchmark_values"] for r in records} == {
         "cold_cache_startup_sec": [100.0],
+        "cold_cache_new_files": [3],
         "populated_cache_startup_sec": [10.0],
+        "populated_cache_new_files": [1],
     }
 
 

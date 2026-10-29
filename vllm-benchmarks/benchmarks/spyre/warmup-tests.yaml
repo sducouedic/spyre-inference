@@ -4,7 +4,8 @@
 # run_vllm_benchmarks.py starts each entry's server twice on one fresh compile
 # cache (TORCHINDUCTOR_CACHE_DIR and VLLM_CACHE_ROOT in a temp dir): first with
 # the cache cold, then populated by that first run. It records both as
-# cold_cache_startup_sec and populated_cache_startup_sec. No requests are sent.
+# cold_cache_startup_sec and populated_cache_startup_sec, and the files each
+# run adds to the cache as *_cache_new_files. No requests are sent.
 #
 # server_parameters mirror the serve-tests.yaml entry of the same model, so the
 # graphs compiled here are the ones a serve run compiles.

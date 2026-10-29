@@ -13,7 +13,9 @@ per `(model, shape)`:
 - `warmup-tests.yaml` → server preparation time: starts `vllm serve` twice on
   one fresh compile cache and records `cold_cache_startup_sec` and
   `populated_cache_startup_sec`, the time to the first healthy `/health` with
-  nothing compiled and with the first run's artifacts on disk. Opt-in: only
+  nothing compiled and with the first run's artifacts on disk, plus
+  `cold_cache_new_files` and `populated_cache_new_files`, the files each run
+  adds to the cache (the populated run should add none). Opt-in: only
   `BENCH_TYPES=warmup` runs it.
 
 `latency-tests-dev.yaml`, `throughput-tests-dev.yaml` and `serve-tests-dev.yaml` are not run in CI. The offline ones run the offline benchmarks at the serve context lengths, and the serve one holds every `serve-tests.yaml` entry plus a 32k entry per model replaying the `all_sequences` trace. Each takes hours per model, so run them on your own pod with `make perf-tests BENCH_SUITE=dev`. `SPYRE_DEVICES` / `AIU_WORLD_SIZE` are derived from each entry's tensor-parallel size rather than spelled out per test.

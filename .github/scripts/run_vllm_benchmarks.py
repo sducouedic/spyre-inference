@@ -640,6 +640,10 @@ def _pytorch_records(model: str, server_parameters: dict, metrics: dict[str, flo
     ]
 
 
+def _count_files(root: Path) -> int:
+    return sum(len(files) for _, _, files in os.walk(root))
+
+
 def run_warmup_benchmark(
     test_name: str,
     server_parameters: dict,
@@ -649,7 +653,10 @@ def run_warmup_benchmark(
     aiu_world_size: str,
     health_timeout: int,
 ) -> bool:
-    """Time server startup on an empty compile cache, then on the one it filled."""
+    """Time server startup on an empty compile cache, then on the one it filled.
+
+    Also counts the files each run adds to the cache: the populated run should add none.
+    """
     with tempfile.TemporaryDirectory(prefix=f"{test_name}-cache-") as cache_dir:
         env_config = {
             **env_config,
@@ -661,7 +668,8 @@ def run_warmup_benchmark(
             if var not in config_env:
                 env.pop(var, None)
 
-        startup_sec = {}
+        metrics = {}
+        files_before = 0
         for state in WARMUP_CACHE_STATES:
             log.info(
                 "=== Starting vLLM server for warmup test: %s (%s cache) ===", test_name, state
@@ -677,22 +685,27 @@ def run_warmup_benchmark(
                 if sec is None:
                     log.error("Warmup test %s failed with a %s cache", test_name, state)
                     return False
-            startup_sec[f"{state}_cache_startup_sec"] = sec
+            files_after = _count_files(Path(cache_dir))
+            metrics[f"{state}_cache_startup_sec"] = sec
+            metrics[f"{state}_cache_new_files"] = files_after - files_before
+            files_before = files_after
 
     model = server_parameters["model"]
     (results_dir / f"{test_name}.json").write_text(
-        json.dumps({"model": model, **startup_sec}, indent=2)
+        json.dumps({"model": model, **metrics}, indent=2)
     )
     # Same switch as vLLM's own .pytorch.json, which is what the ingest reads.
     if os.environ.get("SAVE_TO_PYTORCH_BENCHMARK_FORMAT"):
         (results_dir / f"{test_name}.pytorch.json").write_text(
-            json.dumps(_pytorch_records(model, server_parameters, startup_sec), indent=2)
+            json.dumps(_pytorch_records(model, server_parameters, metrics), indent=2)
         )
     log.info(
-        "Warmup test %s passed (cold %.1fs, populated %.1fs)",
+        "Warmup test %s passed (cold %.1fs, %d files; populated %.1fs, %d files)",
         test_name,
-        startup_sec["cold_cache_startup_sec"],
-        startup_sec["populated_cache_startup_sec"],
+        metrics["cold_cache_startup_sec"],
+        metrics["cold_cache_new_files"],
+        metrics["populated_cache_startup_sec"],
+        metrics["populated_cache_new_files"],
     )
     return True
 
