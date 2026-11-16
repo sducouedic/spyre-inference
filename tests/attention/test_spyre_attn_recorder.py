@@ -143,13 +143,15 @@ def sliding_window_builder(default_vllm_config):
     )
 
 
-def make_bucketer(max_model_len=256, max_num_batched_tokens=64, max_num_seqs=8):
+def make_bucketer(
+    max_model_len=256, max_num_batched_tokens=64, max_num_seqs=8, declare_pages=False
+):
     config = MagicMock()
     config.cache_config.block_size = BLOCK_SIZE
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
     config.scheduler_config.max_num_seqs = max_num_seqs
-    return SpyreAttnBucketer(config)
+    return SpyreAttnBucketer(config, declare_pages=declare_pages)
 
 
 def _recordable(bucketer, pages: int = NUM_PAGES) -> list[SpyreAttnBucket]:
@@ -877,6 +879,67 @@ class TestRecordBatchedDecode:
                     metadata.chunk_page_ids_cpu.shape[0] // metadata.blocks_per_chunk,
                 )
                 assert key in keys, f"num_seqs={num_seqs} kv_len={kv_len} realized {key}"
+
+
+def test_declared_chunk_dispatch_lands_on_a_recorded_kernel(builder, monkeypatch):
+    """With the chunk axis declared, every decode batch realizes a recorded kernel: a
+    bucketed one within one full-width chunk, the declared one past it at its own count."""
+    from torch_spyre._inductor import config as ts_config
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
+    monkeypatch.setenv("SPYRE_BATCHED_DECODE", "1")
+    envs.clear_env_cache()
+    max_model_len = 2048
+    max_blocks = max_model_len // BLOCK_SIZE
+    # Restores the limits the bucketer sets. Not monkeypatch: its undo deletes a
+    # config-module entry, hiding it for later tests.
+    with ts_config.patch(min_reserved_dim_size=8, max_buckets=32):
+        bucketer = builder._attn_bucketer = make_bucketer(
+            max_model_len=max_model_len, declare_pages=True
+        )
+        variants = bucketer.batched_decode_variants()
+        assert any(v.declared for v in variants)
+        bucketed = {
+            (v.num_seqs, v.blocks_per_chunk, v.num_chunks) for v in variants if not v.declared
+        }
+        declared = {(v.num_seqs, v.blocks_per_chunk): v.num_chunks for v in variants if v.declared}
+        for v in variants:
+            md = builder.build_for_batched_decode_variant(v)
+            assert (md.chunk_range is not None) == v.declared, v
+
+        for num_seqs in (1, 2, 4, 8):
+            for kv_len in range(65, max_model_len + 1, 97):
+                seq_lens = torch.tensor(
+                    [max(1, kv_len - 50 * i) for i in range(num_seqs)], dtype=torch.int32
+                )
+                md = builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=CommonAttentionMetadata(
+                        query_start_loc=torch.arange(num_seqs + 1, dtype=torch.int32),
+                        query_start_loc_cpu=torch.arange(num_seqs + 1, dtype=torch.int32),
+                        seq_lens=seq_lens,
+                        num_reqs=num_seqs,
+                        num_actual_tokens=num_seqs,
+                        max_query_len=1,
+                        max_seq_len=int(seq_lens.max()),
+                        block_table_tensor=torch.arange(
+                            num_seqs * max_blocks, dtype=torch.int32
+                        ).reshape(num_seqs, max_blocks),
+                        slot_mapping=torch.zeros(num_seqs, dtype=torch.int64),
+                        causal=True,
+                        is_prefilling=torch.zeros(num_seqs, dtype=torch.bool),
+                    ),
+                )
+                assert md.padded_num_seqs is not None, "builder declined the batched path"
+                num_chunks = md.chunk_page_ids_cpu.shape[0] // md.blocks_per_chunk
+                if md.chunk_range is None:
+                    key = (md.padded_num_seqs, md.blocks_per_chunk, num_chunks)
+                    assert key in bucketed, f"{num_seqs=} {kv_len=} realized {key}"
+                else:
+                    key = (md.padded_num_seqs, md.blocks_per_chunk)
+                    assert key in declared, f"{num_seqs=} {kv_len=} realized {key}"
+                    assert md.chunk_range[0]["min"] <= num_chunks <= declared[key]
+                    assert num_chunks * md.blocks_per_chunk >= int(seq_lens.max()) / BLOCK_SIZE
 
 
 def test_large_batch_ladder_variants_build_onto_their_own_kernel(builder, monkeypatch):

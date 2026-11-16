@@ -2402,6 +2402,65 @@ def test_spyre_attn_one_kernel_serves_every_page_count(
 @pytest.mark.parametrize(
     "configure_device", [pytest.param("spyre", id="device_spyre")], indirect=True
 )
+def test_spyre_attn_one_batched_kernel_serves_every_chunk_count(
+    default_vllm_config,
+    monkeypatch,
+    batched_decode_calls,
+    configure_compilation,
+    configure_device,
+):
+    """Past one full-width chunk, one compiled batched decode kernel serves every chunk
+    count up to max_model_len and matches the reference."""
+    from torch._dynamo.eval_frame import _debug_get_cache_entry_list
+    from torch_spyre._C import get_reserved_dims
+    from torch_spyre._inductor import config as ts_config
+
+    chunk_counts: list[int] = []
+    counting = SpyreAttentionImpl._run_batched_decode
+
+    def declared(self, query_dev, rep_row_ids, k_pages, v_pages, chunk_page_ids, *args):
+        assert get_reserved_dims(chunk_page_ids) is not None, "the chunk axis is not declared"
+        chunk_counts.append(chunk_page_ids.shape[0])
+        return counting(self, query_dev, rep_row_ids, k_pages, v_pages, chunk_page_ids, *args)
+
+    monkeypatch.setattr(SpyreAttentionImpl, "_run_batched_decode", declared)
+
+    # The fixture's max_model_len 2048 at block 128 is 16 pages. Eight sequences fill the
+    # cores at 4 blocks per chunk, so the chunk axis is declared over 2..4: compiled at 4,
+    # then reused at 2 and 3, ragged lengths included.
+    kernel_code = spyre_attn.batched_decode.__code__
+    # Restores the limits the bucketer sets. Not monkeypatch: its undo deletes a
+    # config-module entry, hiding it for later tests.
+    with ts_config.patch(min_reserved_dim_size=8, max_buckets=32):
+        for seq_lens in (
+            [(1, 2048)] * 8,
+            [(1, 600)] * 8,
+            [(1, 1100 - 60 * i) for i in range(8)],
+            [(1, 1600), (1, 520)] * 4,
+        ):
+            batched_decode_calls.clear()
+            _run_spyre_attn_test(
+                seq_lens=seq_lens,
+                block_size=128,
+                sliding_window=None,
+                configure_compilation=configure_compilation,
+                configure_device=configure_device,
+                num_query_heads=8,
+                num_kv_heads=2,
+            )
+            assert batched_decode_calls, "the batch fell back to the per-seq loop"
+            assert len(_debug_get_cache_entry_list(kernel_code)) == 1, f"recompiled at {seq_lens}"
+    assert set(chunk_counts) == {2, 3, 4}, chunk_counts
+
+
+@pytest.mark.parametrize(
+    "configure_compilation",
+    [pytest.param("STOCK_TORCH_COMPILE", id="compiled")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "configure_device", [pytest.param("spyre", id="device_spyre")], indirect=True
+)
 def test_spyre_attn_decode_compiles_at_a_prime_page_count(
     default_vllm_config, monkeypatch, configure_compilation, configure_device
 ):
@@ -3059,17 +3118,20 @@ def test_spyre_attn_batched_decode_correctness(
 @pytest.mark.parametrize(
     "configure_device", [pytest.param("spyre", id="device_spyre")], indirect=True
 )
+@pytest.mark.parametrize("declared", [False, True], ids=["bucketed", "declared"])
 def test_spyre_attn_warmup_records_a_batched_decode_variant(
-    default_vllm_config, batched_decode_calls, configure_compilation, configure_device
+    default_vllm_config, batched_decode_calls, configure_compilation, configure_device, declared
 ):
     """Warmup can trace this layout's batched kernel, so serving does not compile it.
 
     One bucket, not the whole enumeration: what matters is that the recorder reaches the
-    folded gather through builder-produced metadata.
+    folded gather through builder-produced metadata. The declared bucket is the one kernel
+    past one full-width chunk.
     """
     import sys
     from unittest.mock import MagicMock
 
+    from torch_spyre._inductor import config as ts_config
     from vllm.config import get_current_vllm_config
 
     from spyre_inference.v1.attention.backends.spyre_attn import (
@@ -3115,9 +3177,22 @@ def test_spyre_attn_warmup_records_a_batched_decode_variant(
         num_chunks=num_chunks,
     )
 
-    realized = impl._record_batched_one(bucket, MagicMock(), kv_cache, builder, set(), sys.maxsize)
+    # Restores the limits the bucketer sets. Not monkeypatch: its undo deletes a
+    # config-module entry, hiding it for later tests.
+    with ts_config.patch(min_reserved_dim_size=8, max_buckets=32):
+        if declared:
+            # max_model_len 2048 at block 64: 32 pages, 4 chunks of 8 blocks at 4 sequences.
+            builder._attn_bucketer = SpyreAttnBucketer(vllm_config, declare_pages=True)
+            (bucket,) = [
+                v
+                for v in builder.attn_bucketer.batched_decode_variants()
+                if v.num_seqs == num_seqs and v.declared
+            ]
+        realized = impl._record_batched_one(
+            bucket, MagicMock(), kv_cache, builder, set(), sys.maxsize
+        )
 
-    assert realized == (num_seqs, blocks_per_chunk, num_chunks)
+    assert realized == (num_seqs, bucket.blocks_per_chunk, bucket.num_chunks, declared)
     assert batched_decode_calls, "the recorder traced the per-seq loop, not the batched kernel"
 
     del kv_cache

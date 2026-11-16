@@ -425,8 +425,9 @@ covers `max_model_len`; that one kernel serves every page count in the declared 
 Failed recordings are logged and compile on first use instead.
 When the batched-decode kernel is enabled (`SPYRE_BATCHED_DECODE=1`, the default) warmup
 enumerates its variants, the product of the KV-length (`num_blocks`) and num-sequences
-buckets; combinations that reach or exceed the allocated page count are skipped and
-declined at dispatch. A single step can carry a mix of prefill and decode sequences; each
+buckets (with a declared page table, only the KV buckets that fit one full-width chunk, plus
+one variant per num-sequences bucket whose chunk count is declared); combinations that
+reach or exceed the allocated page count are skipped and declined at dispatch. A single step can carry a mix of prefill and decode sequences; each
 sequence is padded to its own query bucket (decodes use the length-1 bucket) before
 dispatch. `SPYRE_ATTN_RECORD=0` restores lazy per-variant compilation.
 

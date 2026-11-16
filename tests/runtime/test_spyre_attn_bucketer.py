@@ -785,3 +785,41 @@ class TestDeclaredPages:
     def test_not_declaring_keeps_the_buckets(self):
         b = SpyreAttnBucketer(make_config(max_model_len=2048))
         assert b.page_range is None
+
+    def test_batched_decode_declares_chunks_past_one_full_chunk(self):
+        b = SpyreAttnBucketer(make_config(max_model_len=8192), declare_pages=True)
+        max_pages = 8192 // BLOCK_SIZE
+        for num_seqs in b.num_seqs_buckets:
+            width = 32 // num_seqs
+            variants = [v for v in b.batched_decode_variants() if v.num_seqs == num_seqs]
+            declared = [v for v in variants if v.declared]
+            assert len(declared) == 1
+            assert declared[0].blocks_per_chunk == width
+            assert declared[0].num_chunks == max_pages // width
+            assert all(v.num_blocks <= width for v in variants if not v.declared)
+            # Past one chunk every block count takes the declared kernel, at its own count.
+            for nb in (width + 1, 3 * width - 1, max_pages):
+                shape = b.batched_decode_shape(num_seqs, nb)
+                assert shape is not None
+                assert shape.chunk_range == {
+                    0: {"min": 2, "max": max_pages // width, "granularity": 1}
+                }
+                assert shape.blocks_per_chunk == width
+                assert shape.num_chunks * width >= nb > (shape.num_chunks - 1) * width
+            shape = b.batched_decode_shape(num_seqs, width)
+            assert shape is not None and shape.chunk_range is None and shape.num_chunks == 1
+
+    def test_batched_decode_keeps_buckets_when_the_chunk_range_is_one_value(self):
+        b = SpyreAttnBucketer(make_config(max_model_len=2048), declare_pages=True)
+        # 32 pages: one sequence fills one chunk, two fill two, the floor.
+        for num_seqs in (1, 2):
+            variants = [v for v in b.batched_decode_variants() if v.num_seqs == num_seqs]
+            assert not any(v.declared for v in variants)
+            assert {v.num_blocks for v in variants} == set(b.num_blocks_buckets)
+        assert any(v.declared for v in b.batched_decode_variants() if v.num_seqs == 4)
+
+    def test_batched_decode_without_declared_pages_keeps_the_buckets(self):
+        b = SpyreAttnBucketer(make_config(max_model_len=8192))
+        assert not any(v.declared for v in b.batched_decode_variants())
+        shape = b.batched_decode_shape(4, 100)
+        assert shape is not None and shape.chunk_range is None

@@ -286,7 +286,13 @@ of these holds:
   `MIN_RESERVED_DIM_SIZE` is not below it;
 - `SPYRE_ATTN_FOR_EACH_TILE=0`, or the layer uses a sliding window.
 
-Batched decode keeps its buckets.
+Batched decode declares its chunk axis the same way, under the same conditions. A call that
+fits in one chunk wide enough to fill the cores (`32 / num_seqs` blocks) keeps its KV bucket.
+A longer one keeps that chunk width and walks its own chunk count, from two chunks up to
+`--max-model-len`, so warmup records one batched kernel per num-sequences bucket for every
+longer context. A num-sequences bucket whose `--max-model-len` fits in two chunks keeps all
+its KV buckets. This needs torch-spyre's `dynamic=` together with `device_layout=`
+(torch-spyre#6327).
 
 ## KV cache size
 

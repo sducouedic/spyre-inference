@@ -38,6 +38,7 @@ import bisect
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -56,6 +57,11 @@ _DEFAULT_QUERY_BUCKET_STEP = 512
 _SPYRE_CORE_COUNT = 32
 
 
+def _full_chunk_width(b_seqs: int) -> int:
+    """Blocks per chunk once a chunk's ``b_seqs * blocks_per_chunk`` entries fill the cores."""
+    return max(1, _SPYRE_CORE_COUNT // b_seqs)
+
+
 def batched_decode_chunking(b_seqs: int, b_blocks: int) -> tuple[int, int]:
     """``(blocks_per_chunk, num_chunks)`` for a bucketed ``(num_seqs, num_blocks)`` pair.
 
@@ -63,7 +69,7 @@ def batched_decode_chunking(b_seqs: int, b_blocks: int) -> tuple[int, int]:
     them, more than one stick's worth hits a backend axis-merge limit. The block
     axis pads up to a whole chunk, so ``blocks_per_chunk * num_chunks >= b_blocks``.
     """
-    blocks_per_chunk = max(1, min(_SPYRE_CORE_COUNT // b_seqs, b_blocks))
+    blocks_per_chunk = min(_full_chunk_width(b_seqs), b_blocks)
     num_chunks = (b_blocks + blocks_per_chunk - 1) // blocks_per_chunk
     return blocks_per_chunk, num_chunks
 
@@ -94,6 +100,22 @@ class SpyreAttnBatchedDecodeBucket:
     num_blocks: int
     blocks_per_chunk: int
     num_chunks: int
+    # One kernel for every chunk count of the batch size's declared chunk range.
+    declared: bool = False
+
+
+class BatchedDecodeShape(NamedTuple):
+    """How build() lays out one batched decode call.
+
+    ``num_blocks`` is the block count the call covers, bucketed or not. ``chunk_range``
+    is the ``tensor.to(dynamic=...)`` declaration of the chunk axis, or None when
+    ``num_chunks`` is a bucket's own.
+    """
+
+    num_blocks: int
+    blocks_per_chunk: int
+    num_chunks: int
+    chunk_range: dict[int, dict[str, int]] | None
 
 
 def _parse_buckets(raw: str | None) -> list[int] | None:
@@ -363,6 +385,20 @@ class SpyreAttnBucketer:
         if declare_pages:
             self._page_range = _declared_page_range(self._num_blocks_buckets[-1])
 
+        # Batched decode declares its chunk axis instead, at the chunk width that fills the
+        # cores. The chunks are the pages per sequence over that width.
+        self._chunk_ranges: dict[int, dict[int, dict[str, int]]] = {}
+        if self._page_range is not None:
+            min_chunks = self._page_range[0]["min"]
+            for num_seqs in self._num_seqs_buckets:
+                width = _full_chunk_width(num_seqs)
+                max_chunks = -(-self._num_blocks_buckets[-1] // width)
+                # A range with min == max would specialize to a constant and fail to trace.
+                if min_chunks < max_chunks:
+                    self._chunk_ranges[num_seqs] = {
+                        0: {"min": min_chunks, "max": max_chunks, "granularity": 1}
+                    }
+
         validate_kv_ladder_env()
 
         # Batched decode only: below the threshold the dense buckets cost warmup without a
@@ -460,6 +496,28 @@ class SpyreAttnBucketer:
     def find_batched_blocks_bucket(self, num_blocks: int, num_seqs_bucket: int) -> int | None:
         return self._round_up(num_blocks, self.batched_blocks_buckets(num_seqs_bucket))
 
+    def batched_decode_shape(
+        self, num_seqs_bucket: int, num_blocks: int
+    ) -> BatchedDecodeShape | None:
+        """The layout of a batched decode call over ``num_blocks`` blocks, or None if no
+        bucket holds it.
+
+        A call that fits one full-width chunk keeps its bucket. A longer one, when the
+        batch size has a declared chunk range, keeps the full width and covers its own
+        block count, so one kernel serves every chunk count in the range.
+        """
+        b_blocks = self.find_batched_blocks_bucket(num_blocks, num_seqs_bucket)
+        if b_blocks is None:
+            return None
+        chunk_range = self._chunk_ranges.get(num_seqs_bucket)
+        width = _full_chunk_width(num_seqs_bucket)
+        if chunk_range is None or b_blocks <= width:
+            return BatchedDecodeShape(
+                b_blocks, *batched_decode_chunking(num_seqs_bucket, b_blocks), None
+            )
+        num_chunks = max(-(-num_blocks // width), chunk_range[0]["min"])
+        return BatchedDecodeShape(num_blocks, width, num_chunks, chunk_range)
+
     def min_real_query_len(self, padded_query_len: int) -> int:
         """Smallest runtime query_len that rounds up onto ``padded_query_len``."""
         idx = bisect.bisect_left(self._query_buckets, padded_query_len)
@@ -508,18 +566,27 @@ class SpyreAttnBucketer:
         if not envs.SPYRE_BATCHED_DECODE:
             return []
         out: list[SpyreAttnBatchedDecodeBucket] = []
-        pairs = sorted(
-            ((nb, ns) for ns in self._num_seqs_buckets for nb in self.batched_blocks_buckets(ns)),
-            reverse=True,
-        )
-        for num_blocks, num_seqs in pairs:
-            blocks_per_chunk, num_chunks = batched_decode_chunking(num_seqs, num_blocks)
+        pairs = [
+            (nb, ns) for ns in self._num_seqs_buckets for nb in self.batched_blocks_buckets(ns)
+        ]
+        # A declared chunk range replaces every bucket past one full-width chunk with one
+        # variant, traced at the block count that covers max_model_len.
+        max_blocks = self._num_blocks_buckets[-1]
+        for num_seqs in self._chunk_ranges:
+            pairs = [
+                (nb, ns) for nb, ns in pairs if ns != num_seqs or nb <= _full_chunk_width(num_seqs)
+            ]
+            pairs.append((max_blocks, num_seqs))
+        for num_blocks, num_seqs in sorted(pairs, reverse=True):
+            shape = self.batched_decode_shape(num_seqs, num_blocks)
+            assert shape is not None
             out.append(
                 SpyreAttnBatchedDecodeBucket(
                     num_seqs=num_seqs,
-                    num_blocks=num_blocks,
-                    blocks_per_chunk=blocks_per_chunk,
-                    num_chunks=num_chunks,
+                    num_blocks=shape.num_blocks,
+                    blocks_per_chunk=shape.blocks_per_chunk,
+                    num_chunks=shape.num_chunks,
+                    declared=shape.chunk_range is not None,
                 )
             )
         return out
