@@ -1049,7 +1049,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
         model = self._compiled_vision_model()
         if model is None:
             return
-        with _set_spyre_compilation_settings(self.vllm_config), _vision_solver_settings():
+        with _set_spyre_compilation_settings(self.vllm_config):
             model.compile_vision_graphs()
             self._maybe_init_encoder_cudagraph_manager()
             assert self.encoder_cudagraph_manager is not None
@@ -1787,29 +1787,6 @@ class TorchSpyreModelRunner(GPUModelRunner):
             pin_memory=False,
             with_numpy=numpy,
         )
-
-
-@contextmanager
-def _vision_solver_settings():
-    """Stop the vision graphs' CP-SAT layout solves once their plan stops improving.
-
-    Uses ``SPYRE_VISION_CPSAT_STALL_SECONDS``. Does nothing when the user sets
-    ``CPSAT_STALL_SECONDS``, or when torch-spyre has no ``cpsat_stall_seconds``.
-    """
-    import os
-
-    from torch_spyre._inductor import config as spyre_config
-
-    stall = envs.SPYRE_VISION_CPSAT_STALL_SECONDS
-    if (
-        stall <= 0
-        or "CPSAT_STALL_SECONDS" in os.environ
-        or not hasattr(spyre_config, "cpsat_stall_seconds")
-    ):
-        yield
-        return
-    with spyre_config.patch({"cpsat_stall_seconds": stall}):
-        yield
 
 
 @contextmanager

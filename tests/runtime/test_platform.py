@@ -1021,6 +1021,24 @@ def test_configure_threading_raises_when_undetectable(monkeypatch):
         configure_threading(worker_count=1)
 
 
+@pytest.mark.parametrize(
+    ("world_size", "pool", "expected"),
+    [(4, 32, 8), (4, 4, 4), (1, 32, 32)],
+    ids=["shares-the-pod", "keeps-a-smaller-pool", "single-worker-untouched"],
+)
+def test_size_layout_solver_threads(monkeypatch, world_size, pool, expected):
+    """Each worker's CP-SAT pool is its share of the CPUs, not the pod's total."""
+    from torch_spyre._inductor import config as spyre_config
+
+    from spyre_inference.threading_config import size_layout_solver_threads
+
+    monkeypatch.setenv("SPYRE_UPDATE_THREAD_CONFIG", "1")
+    _force_cpu_count(monkeypatch, 32.0)
+    with spyre_config.patch({"num_cpus": pool}):
+        size_layout_solver_threads(world_size)
+        assert spyre_config.get_cpu_count() == expected
+
+
 # ---------------------------------------------------------------------------
 # Registry check — end-to-end through check_and_update_config + platform boot
 # ---------------------------------------------------------------------------

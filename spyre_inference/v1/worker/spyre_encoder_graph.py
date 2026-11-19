@@ -16,13 +16,17 @@
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.logger import init_logger
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
+from spyre_inference import envs
 from spyre_inference.custom_ops.utils import convert
 
 if TYPE_CHECKING:
@@ -144,6 +148,11 @@ class SpyreEncoderGraphManager(EncoderCudaGraphManager):
             self.path_token_budgets = budgets
         return [outputs[i] for i in range(len(tokens))]
 
+    def capture(self, graph_pool: Any) -> None:
+        """Compile every budget, with the vision solver settings of ``_vision_solver_settings``."""
+        with _vision_solver_settings():
+            super().capture(graph_pool)
+
     def _capture_budget_graph(
         self, token_budget: int, path: str = "default", axis_keys: tuple = ()
     ) -> None:
@@ -189,3 +198,25 @@ class SpyreEncoderGraphManager(EncoderCudaGraphManager):
     def _upload(self, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Copy host buffers to the encoder's device."""
         return {key: convert(value, device=self.device) for key, value in values.items()}
+
+
+@contextmanager
+def _vision_solver_settings() -> Iterator[None]:
+    """Stop the vision graphs' CP-SAT layout solves once their plan stops improving.
+
+    Sets torch-spyre's ``cpsat_stall_seconds`` to ``SPYRE_VISION_CPSAT_STALL_SECONDS``. Does
+    nothing when the user sets ``CPSAT_STALL_SECONDS``, or when torch-spyre has no such knob.
+    """
+    from torch_spyre._inductor import config as spyre_config
+
+    stall = envs.SPYRE_VISION_CPSAT_STALL_SECONDS
+    if (
+        stall <= 0
+        or "CPSAT_STALL_SECONDS" in os.environ
+        or not hasattr(spyre_config, "cpsat_stall_seconds")
+    ):
+        yield
+        return
+    with spyre_config.patch({"cpsat_stall_seconds": stall}):
+        logger.info("Vision encoder CP-SAT solves stop after a %.0fs stall.", stall)
+        yield

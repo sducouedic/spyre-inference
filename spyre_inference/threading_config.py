@@ -174,3 +174,32 @@ def apply_in_process_threading(parallel_config) -> None:
     num_threads = os.environ.get("OMP_NUM_THREADS", "")
     if num_threads.isdigit() and int(num_threads) > 0:
         torch.set_num_threads(int(num_threads))
+
+
+def size_layout_solver_threads(world_size: int) -> None:
+    """Give torch-spyre's CP-SAT layout solver this worker's share of the CPUs.
+
+    torch-spyre sizes the solver's worker pool to ``SPYRE_NUM_CPUS`` or the pod's CPU quota,
+    which is every worker's total. With several workers compiling at once, each solve then
+    runs that many threads on a fraction of the CPUs. Runs in the worker process, after
+    torch-spyre is imported; leaves a smaller explicit pool alone.
+    """
+    if not envs.SPYRE_UPDATE_THREAD_CONFIG or world_size <= 1:
+        return
+    cpu_count, _ = get_cpu_count()
+    if cpu_count is None:
+        return
+    from torch_spyre._inductor import config as spyre_config
+
+    share = max(1, math.ceil(cpu_count / world_size))
+    pool = spyre_config.get_cpu_count()
+    if pool <= share:
+        return
+    spyre_config.num_cpus = share
+    logger.info(
+        "CP-SAT layout solver: %d threads for this worker (%d CPUs / %d workers), not %d.",
+        share,
+        int(cpu_count),
+        world_size,
+        pool,
+    )
