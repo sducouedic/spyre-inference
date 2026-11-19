@@ -91,6 +91,7 @@ from spyre_inference.v1.pool.encoder_grid import (
 from spyre_inference.v1.pool.warmup import dummy_pooling_metadata, warm_pooler_row_widths
 from spyre_inference.v1.sample.sampler import greedy_sample
 from spyre_inference.v1.sample.topk_topp_sampler import SpyreTopKTopPSampler
+from spyre_inference.v1.worker.body_precompile import precompile_body_buckets
 from spyre_inference.v1.worker.compile_granularity import compile_for_spyre, compile_granularity
 from spyre_inference.v1.worker.encoder_grid import (
     EncoderDispatchStats,
@@ -1014,6 +1015,14 @@ class TorchSpyreModelRunner(GPUModelRunner):
         row_widths = logits_row_buckets(bucket_sizes, self.max_num_reqs, self.num_spec_tokens)
         t0 = time.time()
         with _set_spyre_compilation_settings(self.vllm_config):
+            check = None
+            if envs.SPYRE_PARALLEL_BODY_PRECOMPILE > 0:
+                check = precompile_body_buckets(
+                    self.model,
+                    self._dummy_run,
+                    bucket_sizes,
+                    envs.SPYRE_PARALLEL_BODY_PRECOMPILE,
+                )
             # Compile largest bucket first: Inductor's internal caches benefit
             # from seeing the most complex shape first, so subsequent smaller
             # shapes compile faster via partial cache hits.
@@ -1034,6 +1043,8 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 for rows in sorted(row_widths, reverse=True):
                     self._dummy_sampler_run(widest_hidden_states[:rows])
             self._warmup_multimodal_encoder()
+            if check is not None:
+                check.finish()  # warns when the warmup missed what the workers compiled
         self.spyre_shape_bucketer.mark_warmed_up()
         logger.info(
             "Warmup complete in %.3fs for %d buckets.",

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     SPYRE_COMPILE_GUARD: str = "warn"
     SPYRE_ATTN_PROFILING: bool = False
     SPYRE_ATTN_RECORD: bool = True
+    SPYRE_PARALLEL_BODY_PRECOMPILE: int = 0
     SPYRE_ATTN_KV_BUCKETS: str | None = None
     SPYRE_ATTN_KV_LADDER: str = "pow2"
     SPYRE_ATTN_KV_LADDER_LARGE_BATCH: str | None = None
@@ -93,6 +94,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # warmup, so no request pays an Inductor compile mid-serving. "0" falls back to
     # compiling each variant lazily on first use.
     "SPYRE_ATTN_RECORD": lambda: bool(int(os.getenv("SPYRE_ATTN_RECORD", "1"))),
+    # Number of forked processes that compile the decoder blocks of every body bucket
+    # side by side before the body warmup (torch-spyre's fork_inner_compiles). "0"
+    # (default) compiles them one bucket after another. Capped at this rank's CPU share
+    # (torch threads). Needs the FX graph cache, so it does nothing with
+    # TORCHINDUCTOR_FORCE_DISABLE_CACHES=1. On a restart with warm caches the children
+    # only load cache hits (gemma-4-26B-A4B TP4: +14 s).
+    "SPYRE_PARALLEL_BODY_PRECOMPILE": lambda: int(os.getenv("SPYRE_PARALLEL_BODY_PRECOMPILE", "0")),
     # Comma-separated kv_len buckets to record, unset uses the SPYRE_ATTN_KV_LADDER preset.
     "SPYRE_ATTN_KV_BUCKETS": lambda: os.getenv("SPYRE_ATTN_KV_BUCKETS"),
     # Named KV bucket ladder: pow2 (default), 8_5, 4_3, 9_8 or uniform.
