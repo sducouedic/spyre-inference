@@ -549,16 +549,61 @@ def _gathered(layer: RoutedExperts, x: torch.Tensor, router_logits: torch.Tensor
     )
 
 
+# Tokens per gathered kernel. Each kernel in the loop is a compile of its own, so fewer,
+# wider kernels warm up faster (gemma-4-26B-A4B TP4, 8 tokens: 16 s instead of 73 s). How
+# wide one lowers depends on the shapes: gemma-4 at TP4 lowers 4 tokens but not 8.
+_GATHERED_KERNEL_TOKENS = 4
+
+# Token counts whose grouped gathered loop did not lower; they run one token per kernel.
+_GATHERED_UNGROUPED: set[int] = set()
+
+
+def _gathered_loop(
+    layer: RoutedExperts, x: torch.Tensor, router_logits: torch.Tensor, step: int
+) -> torch.Tensor:
+    # ``dynamic=False`` specializes this loop to the packed bucket, so slicing, expert calls,
+    # and assembly stay in one compiled region.
+    rows = [
+        _gathered(layer, x[start : start + step], router_logits[start : start + step])
+        for start in range(0, x.shape[0], step)
+    ]
+    return torch.cat(rows)
+
+
 def _gathered_tokens(
     layer: RoutedExperts, x: torch.Tensor, router_logits: torch.Tensor
 ) -> torch.Tensor:
-    # The gathered kernel only lowers at one token. ``dynamic=False`` specializes this loop to
-    # the packed bucket, so slicing, expert calls, and assembly stay in one compiled region.
-    rows = [
-        _gathered(layer, x[token : token + 1], router_logits[token : token + 1])
-        for token in range(x.shape[0])
-    ]
-    return torch.cat(rows)
+    return _gathered_loop(layer, x, router_logits, _GATHERED_KERNEL_TOKENS)
+
+
+def _gathered_each_token(
+    layer: RoutedExperts, x: torch.Tensor, router_logits: torch.Tensor
+) -> torch.Tensor:
+    return _gathered_loop(layer, x, router_logits, 1)
+
+
+def _gathered_batch(
+    layer: RoutedExperts, x: torch.Tensor, router_logits: torch.Tensor
+) -> torch.Tensor:
+    """The grouped gathered loop, or one token per kernel where the grouped one does not lower."""
+    from torch._inductor.exc import InductorError
+
+    tokens = x.shape[0]
+    if tokens not in _GATHERED_UNGROUPED:
+        try:
+            return _region(layer, "gathered_batch", _gathered_tokens)(layer, x, router_logits)
+        except InductorError as exc:
+            if "Unsupported" not in str(exc):
+                raise
+            _GATHERED_UNGROUPED.add(tokens)
+            logger.warning(
+                "Spyre MoE: the gathered kernel does not lower over %d tokens at these "
+                "shapes; running %d tokens one per kernel (%s).",
+                _GATHERED_KERNEL_TOKENS,
+                tokens,
+                str(exc).splitlines()[0],
+            )
+    return _region(layer, "gathered_each", _gathered_each_token)(layer, x, router_logits)
 
 
 def _rows_are_stick_addressable(x: torch.Tensor, router_logits: torch.Tensor, stick: int) -> bool:
@@ -1088,7 +1133,7 @@ class SpyreUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             with moe_scope:
                 if tokens == 1:
                     return _region(layer, "gathered", _gathered)(layer, x, router_logits)
-                return _region(layer, "gathered_batch", _gathered_tokens)(layer, x, router_logits)
+                return _gathered_batch(layer, x, router_logits)
         with moe_scope:
             recipe = layer.spyre_moe_recipe
             if recipe.routing == "full_softmax":

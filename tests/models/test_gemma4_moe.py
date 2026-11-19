@@ -498,7 +498,8 @@ def _dispatch_recorder(monkeypatch, fail_on=None):
             calls.append((name, fn.__name__))
             if name == fail_on:
                 raise RuntimeError("region blew up")
-            return torch.zeros(args[1].shape[0] if name == "gathered_batch" else 1)
+            batch = name in ("gathered_batch", "gathered_each")
+            return torch.zeros(args[1].shape[0] if batch else 1)
 
         return run
 
@@ -551,6 +552,41 @@ def test_a_small_batch_uses_the_compiled_gathered_loop(monkeypatch):
     assert calls == [("gathered_batch", "_gathered_tokens")]
     assert out.shape[0] == 3, "the per-token results must be reassembled into one batch"
     assert resets == [], "the gathered form declares no persistent dims to reset"
+
+
+def test_a_small_batch_falls_back_to_one_token_per_kernel_where_grouping_does_not_lower(
+    monkeypatch,
+):
+    """A grouped loop the backend refuses is retried one token per kernel, once per count."""
+    from torch._inductor.exc import InductorError
+
+    from spyre_inference import moe as moe_module
+
+    monkeypatch.setenv("SPYRE_MOE_GATHERED_MAX_TOKENS", "4")
+    monkeypatch.setattr(moe_module, "_GATHERED_UNGROUPED", set())
+    calls, _ = _dispatch_recorder(monkeypatch)
+    recorder = moe_module._region
+
+    def refusing_region(layer, name, fn):
+        run = recorder(layer, name, fn)
+        if name != "gathered_batch":
+            return run
+
+        def refuse(*args):
+            run(*args)
+            raise InductorError(RuntimeError("Unsupported: unexpected stick expression"), None)
+
+        return refuse
+
+    monkeypatch.setattr(moe_module, "_region", refusing_region)
+    layer = _dispatch_layer("full_softmax")
+    assert _apply(layer, tokens=3).shape[0] == 3
+    assert _apply(layer, tokens=3).shape[0] == 3
+    assert calls == [
+        ("gathered_batch", "_gathered_tokens"),
+        ("gathered_each", "_gathered_each_token"),
+        ("gathered_each", "_gathered_each_token"),
+    ], "the grouped loop is tried once per token count"
 
 
 def test_a_batch_whose_rows_are_not_stick_addressable_takes_the_all_expert_form(monkeypatch):
@@ -840,7 +876,7 @@ def test_gathered_loop_matches_dense_reference(stick_aligned_moe_weights, num_to
     from torch_spyre._C import get_elem_in_stick
     from torch_spyre.ops.fallbacks import FallbackWarning
 
-    from spyre_inference.moe import SpyreMoERecipe, _gathered_tokens
+    from spyre_inference.moe import SpyreMoERecipe, _gathered_batch
 
     host, device = stick_aligned_moe_weights
     gen = torch.Generator().manual_seed(num_tokens)
@@ -867,12 +903,8 @@ def test_gathered_loop_matches_dense_reference(stick_aligned_moe_weights, num_to
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", FallbackWarning)
-        region = torch.compile(_gathered_tokens, backend="inductor", fullgraph=True, dynamic=False)
-        actual = region(
-            layer,
-            x.to("spyre"),
-            logits.to("spyre"),
-        )
+        # The grouped loop where it lowers, else one token per kernel: both must match.
+        actual = _gathered_batch(layer, x.to("spyre"), logits.to("spyre"))
 
     fallbacks = [str(w.message) for w in caught if issubclass(w.category, FallbackWarning)]
     assert not fallbacks, f"the gathered loop fell back to CPU: {fallbacks}"
