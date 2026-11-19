@@ -57,9 +57,12 @@ def _passthrough(block: nn.Module) -> Callable | None:
     """What a block whose compile went to a child returns instead of running.
 
     vLLM decoder blocks take ``(positions, hidden_states, residual, ...)`` and return
-    ``(hidden_states, residual)``. The stand-in returns its input hidden states, and
-    them again as the residual when none came in, as a block that adds its own residual
-    does. None for a block with another signature: it is not precompiled.
+    ``(hidden_states, residual)``. The stand-in returns a new tensor like its input
+    hidden states, and it again as the residual when none came in, as a block that adds
+    its own residual does. New and made in inference mode, as a compiled block's output
+    is: the next block's guards check that, and the first block's input can differ (a
+    multimodal model's merged embeddings are not inference tensors). None for a block
+    with another signature: it is not precompiled.
     """
     try:
         params = list(inspect.signature(block.forward).parameters)
@@ -71,7 +74,9 @@ def _passthrough(block: nn.Module) -> Callable | None:
     def output(*args, **kwargs):
         bound = dict(zip(params, args))
         bound.update(kwargs)
-        hidden, residual = bound["hidden_states"], bound.get("residual")
+        with torch.inference_mode():
+            hidden = torch.empty_like(bound["hidden_states"])
+        residual = bound.get("residual")
         return hidden, hidden if residual is None else residual
 
     return output
@@ -87,9 +92,7 @@ def precompile_body_buckets(
 
     ``dummy_run(size)`` runs one dummy forward of ``size`` tokens. Returns a started
     ``SecondPassCheck`` for the warmup that follows when children compiled something,
-    else None (nothing to fork, or a torch-spyre without the helper). The FX graph cache
-    is read inside the inner compile, so with warm caches the children load the hits;
-    only a first bucket that compiles nothing (an AOTAutograd cache hit) stops it early.
+    else None (warm caches, nothing to fork, or a torch-spyre without the helper).
     """
     try:
         from torch_spyre._inductor.parallel_precompile import (  # ty: ignore[unresolved-import]
@@ -103,7 +106,8 @@ def precompile_body_buckets(
             "(torch-spyre/torch-spyre#6262); compiling the body buckets one by one."
         )
         return None
-    if "should_fork" not in inspect.signature(fork_inner_compiles).parameters:
+    params = inspect.signature(fork_inner_compiles).parameters
+    if "should_fork" not in params:
         logger.warning(
             "SPYRE_PARALLEL_BODY_PRECOMPILE needs fork_inner_compiles(should_fork=...); "
             "compiling the body buckets one by one."
@@ -143,8 +147,11 @@ def precompile_body_buckets(
         for block, output in blocks:
             block._compiled_call_impl = wrap(block._compiled_call_impl, output)
         # A compile can take minutes in a child that shares the CPUs with the others.
+        # A cache hit loads here, so with warm caches the first bucket's blocks run and
+        # the precompile stops there.
+        extra = {"load_cache_hits": True} if "load_cache_hits" in params else {}
         with fork_inner_compiles(
-            workers, timeout_s=3600.0, should_fork=lambda: in_block[0]
+            workers, timeout_s=3600.0, should_fork=lambda: in_block[0], **extra
         ) as pool:
             for i, size in enumerate(sizes):
                 # A stand-in outside a block stops this bucket: the warmup compiles the rest.

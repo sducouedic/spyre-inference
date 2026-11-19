@@ -100,7 +100,8 @@ def test_cold_start_traces_every_bucket_and_passes_hidden_states_through(monkeyp
         (1, 1, False, True),
     ]
     for hidden, residual in outputs:
-        assert hidden is residual, "a stand-in block returns its input hidden states"
+        # Made in inference mode, as a compiled block's output is.
+        assert hidden.is_inference() and residual.is_inference()
     assert _Block.forward.__code__ in resets
     assert nn.Module._call_impl.__code__ in resets
     assert check.expected == 4

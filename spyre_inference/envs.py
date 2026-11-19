@@ -98,8 +98,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # side by side before the body warmup (torch-spyre's fork_inner_compiles). "0"
     # (default) compiles them one bucket after another. Capped at this rank's CPU share
     # (torch threads). Needs the FX graph cache, so it does nothing with
-    # TORCHINDUCTOR_FORCE_DISABLE_CACHES=1. On a restart with warm caches the children
-    # only load cache hits (gemma-4-26B-A4B TP4: +14 s).
+    # TORCHINDUCTOR_FORCE_DISABLE_CACHES=1. A restart with warm caches stops after the
+    # first bucket.
     "SPYRE_PARALLEL_BODY_PRECOMPILE": lambda: int(os.getenv("SPYRE_PARALLEL_BODY_PRECOMPILE", "0")),
     # Comma-separated kv_len buckets to record, unset uses the SPYRE_ATTN_KV_LADDER preset.
     "SPYRE_ATTN_KV_BUCKETS": lambda: os.getenv("SPYRE_ATTN_KV_BUCKETS"),
