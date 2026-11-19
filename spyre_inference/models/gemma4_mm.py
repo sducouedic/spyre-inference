@@ -593,7 +593,9 @@ class SpyreGemma4ForConditionalGeneration(SpyreVisionEncoderMixin, Gemma4ForCond
         )
         # [patch width, D] since process_weights_after_loading.
         patch_weight_t = cast(torch.Tensor, tower.patch_embedder.input_proj.weight)
-        x = (torch.matmul(values["patches"], patch_weight_t) + rows[:, :hidden]).unsqueeze(0)
+        # A 3D matmul gives x the layout each block's output has, so every block shares one
+        # compile; a 2D matmul then ``unsqueeze`` makes the first block compile on its own.
+        x = torch.matmul(values["patches"].unsqueeze(0), patch_weight_t) + rows[:, :hidden]
         cos = rows[:, hidden : hidden + head_dim][None, :, None]
         sin = rows[:, hidden + head_dim :][None, :, None]
         mask = segment_mask(values["segments"], x.dtype)

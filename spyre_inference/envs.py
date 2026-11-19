@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     SPYRE_MRV2_KERNELS: str = "host"
     SPYRE_COMPILE_GRANULARITY: str = "block"
     SPYRE_COMPILE_GUARD: str = "warn"
+    SPYRE_VISION_CPSAT_STALL_SECONDS: float = 10.0
     SPYRE_ATTN_PROFILING: bool = False
     SPYRE_ATTN_RECORD: bool = True
     SPYRE_ATTN_KV_BUCKETS: str | None = None
@@ -85,6 +86,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # torch-spyre compiles every eager aten op, so those compiles continue for the
     # whole run; they are never reported.
     "SPYRE_COMPILE_GUARD": lambda: os.getenv("SPYRE_COMPILE_GUARD") or "warn",
+    # Seconds a CP-SAT layout solve of a vision encoder graph may go without a better
+    # plan before it stops and keeps its best one (torch-spyre's cpsat_stall_seconds).
+    # These solves find their plan in 15-35 s and then run to the 60 s limit. 0 lets
+    # them run to the limit. A CPSAT_STALL_SECONDS set by the user wins.
+    "SPYRE_VISION_CPSAT_STALL_SECONDS": lambda: float(
+        os.getenv("SPYRE_VISION_CPSAT_STALL_SECONDS", "10")
+    ),
     # When "1", wrap attention forward/softmax in torch.profiler.record_function
     # spans for kineto trace capture. Off by default: profiled runs are not
     # wall-clock comparable.

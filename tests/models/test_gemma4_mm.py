@@ -556,6 +556,24 @@ def test_ids_outside_mask_on_spyre(num_tokens):
             assert torch.equal(got, torch.where(mask, 0, ids))
 
 
+def test_every_vision_block_shares_one_compile():
+    """``vision_embed``'s output has the layout each block returns, so the first block does
+    not compile on its own: one graph each for embed, the blocks and project."""
+    if not spyre_available():
+        pytest.skip("Spyre device not available")
+    from torch._dynamo.utils import counters
+
+    from spyre_inference.custom_ops.utils import convert
+
+    model = _spyre_model(_tower_config(num_layers=3)).to("spyre")
+    model.compile_vision_graphs()
+    values = model._vision_empty(model.vision_patch_multiple)
+    counters.clear()
+    with torch.inference_mode():
+        model.encoder_cudagraph_forward({k: convert(v, device="spyre") for k, v in values.items()})
+    assert counters["stats"]["unique_graphs"] == 3
+
+
 def test_upstream_tower_contract_is_unchanged():
     """The Spyre attention and the block call rely on these; diff them on a bump."""
     layer_src = inspect.getsource(modeling_gemma4.Gemma4VisionEncoderLayer.forward)
