@@ -1,6 +1,6 @@
 ---
 name: prepare-pull-request
-description: Strip verbose comments, docstrings and commit messages out of a finished change, then push and open a PR with a brief plain-English body. Use whenever the user asks to clean up code for a PR, tidy up before review, or open/raise a PR for work that is already written — and always before running `gh pr create`. Encodes hard limits (comments deleted by default, 1-2 lines each if kept, no absolute performance numbers anywhere) because the unguided default is far too verbose.
+description: Strip verbose comments, docstrings, unneeded tests and commit messages out of a finished change, then push and open a PR with a brief plain-English body. Use whenever the user asks to clean up code for a PR, tidy up before review, or open/raise a PR for work that is already written — and always before running `gh pr create`. Encodes hard limits (comments deleted by default, 1-2 lines each if kept, a new test deleted only if it cannot catch a real bug, no absolute performance numbers anywhere) because the unguided default is far too verbose.
 ---
 
 # Clean up and open a PR
@@ -65,7 +65,46 @@ Same bias, plus:
 - never restate the signature, types or shapes that are already annotated
 - no usage examples, no rationale, no "This function is responsible for..."
 
-## 3. Leftovers
+## 3. Tests
+
+The bias is the opposite of comments: a test stays by default. A missing test can let a
+real bug through, while a missing comment only makes the code harder to read. Delete a
+test only when it clearly falls into one of the cases below.
+
+Scope: new test functions and new parametrize cases. Check what the branch adds to
+existing tests (new asserts, new setup) against the same list, but never delete it: raise
+it to the user instead.
+
+List them:
+
+```bash
+git diff origin/main...HEAD -U0 -- 'tests/*.py' |
+  awk '/^\+\+\+ /{f=$2} /^\+[^+]/{ if ($0 ~ /def test_|parametrize|pytest\.param\(/) print f": "$0 }'
+```
+
+For each test, ask: would it fail on a plausible bug in the code this branch adds? If
+yes, keep it. Delete it when it is one of:
+
+- tests of minor behaviour nobody would notice breaking
+- tests that re-implement the code: the expected value comes from the same logic as the
+  code under test, so the test passes whenever the code runs
+- tests of Python, torch or vLLM rather than our code: after adding
+  `os.environ.setdefault(name, "1")`, a test that the variable is `"1"` when unset only
+  tests `setdefault`
+- tests that never reach the changed code: everything mocked, or asserting on the mocks
+- tests pinning constants, defaults, log text or private names, which break on any refactor
+- duplicates of an existing test, and parametrize cases that take the same path as another case
+- tests that cost far more than they are worth: a vLLM engine start or a Spyre run for
+  something a unit test or an existing e2e test covers. Extend the existing test instead
+  of adding one.
+
+Never delete a regression test for the bug the branch fixes, a numerical check against a
+CPU reference, or a probe on an upstream bug.
+
+When unsure, ask the user: list the doubtful tests with a one-line reason each, rather
+than delete them silently.
+
+## 4. Leftovers
 
 Delete debug prints, commented-out code, unused imports, scratch files, and probes that
 only existed to prove the fix. Check what is actually in the diff:
@@ -113,17 +152,18 @@ A change that stays in shared code (platform, worker, model runner, attention, o
 models) must work for every model, not just the new one, and needs a one-line reason
 in the PR body.
 
-## 4. Format and verify
+## 5. Format and verify
 
 ```bash
 bash format.sh
-uv run pytest -m "not upstream" <the test covering this change>
+uv run pytest -m "not upstream" --durations=0 <the tests that survived section 3>
 ```
 
 Deleting comments cannot break code, but the formatter reflows what is left and those
-changes must be committed. Re-run the test so the PR body can honestly claim it.
+changes must be committed. Re-run the tests so the PR body can honestly claim them;
+`--durations=0` gives the cost rule of section 3 a number to judge by.
 
-## 5. Verify commit signoffs and signatures
+## 6. Verify commit signoffs and signatures
 
 Every commit needs both:
 
@@ -142,7 +182,7 @@ gh api repos/torch-spyre/spyre-inference/commits/<sha> --jq .commit.verification
 
 Amend a commit that lacks either with `-s -S` before pushing. If no signing key is set up, run the `github-commit` skill.
 
-## 6. Push
+## 7. Push
 
 ```bash
 git push fork <branch-name>
@@ -151,7 +191,7 @@ git push fork <branch-name>
 Never force-push, never push to `main`. If history needs fixing, push a new branch. If
 git identity is unset, run the `github-commit` skill first.
 
-## 7. PR body
+## 8. PR body
 
 Write the body to `.pr_drafts/$(git branch --show-current).md` and use `--body-file`; inline `--body`
 mangles multi-line text. The `.pr_drafts/` folder is gitignored, so drafts never land in
